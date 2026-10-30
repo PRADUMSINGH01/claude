@@ -317,6 +317,8 @@ export function unfitReason(info, { type, needsText, prompt, stats = {} }) {
   if (info.imageVars.length) return 'needs images or video'; // would show demo photos
   if (needsText && !info.textVars.length) return 'copy is hard-coded';
   if (info.needsGpu && !config.registryGpuItems) return 'needs a GPU (three.js/WebGL)';
+  // A component's source is merged into a written scene, whose contract refuses randomness and timers.
+  if (type === 'component' && info.nondeterministic) return 'uses randomness or timers (a written scene must repeat exactly)';
   // Its own pictures show in every film; offer it only when the request is about what they show.
   const pictured = (info.tags ?? []).some((t) => /^(photo|footage|leaves|cinemagraph)$/i.test(t));
   const subjects = (info.tags ?? []).filter((t) => t.length > 3 && !GENERIC_TAG.test(t));

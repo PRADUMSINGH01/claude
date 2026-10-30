@@ -144,6 +144,8 @@ await step('registry first: vetting, several queries per beat, use-or-justify, d
   assert.equal(unfitReason(item({}), opts), null);
   assert.match(unfitReason(item({ kind: 'component' }), opts), /is a component, not a block/);
   assert.match(unfitReason(item({ needsGpu: true }), opts), /needs a GPU/);
+  assert.match(unfitReason(item({ kind: 'component', nondeterministic: true }), { ...opts, type: 'component', needsText: false }), /randomness or timers/);
+  assert.equal(unfitReason(item({ nondeterministic: true }), opts), null, 'a mounted block keeps its own script');
   assert.match(unfitReason(item({ tags: ['title-card', 'leaves'], bakedMedia: ['assets/leaf.webp'] }), opts), /demo pictures/);
   assert.equal(unfitReason(item({ tags: ['leaves'], bakedMedia: ['assets/leaf.webp'] }), { ...opts, prompt: 'falling leaves title' }), null);
   assert.match(unfitReason(item({ tags: ['effect', 'cinemagraph', 'photo'] }), opts), /demo pictures/);
@@ -170,6 +172,17 @@ await step('registry first: vetting, several queries per beat, use-or-justify, d
   assert.equal(planChecks({ theme: {}, scenes: [{ id: 'b', start: 0, duration: 4, text: [], block: null, vars: {} }] }, { background: { wanted: false } }, sl).length, 0);
   const justified = planChecks({ theme: {}, decisions: ['b: no registry item fits because the beat is a bare hold'], scenes: [scenes[1]] }, { background: { wanted: false } }, sl);
   assert.equal(justified.length, 0);
+});
+
+await step('scene writer: scatter drawn with Math.random is seeded in code; per-frame randomness is not', async () => {
+  const { seedRandom, staticProblems } = await import('../src/build/scenes.js');
+  const html = '<template><div id="root" data-composition-id="c"></div><script>const tl = gsap.timeline({ paused: true }); for (let i = 0; i < 9; i++) tl.to(`#c-${i}`, { x: Math.random() * 400 }, 0); window.__timelines["c"] = tl;</script></template>';
+  const seeded = seedRandom(html, 'c');
+  assert.doesNotMatch(seeded, /Math\.random/);
+  assert.equal(seeded, seedRandom(html, 'c'), 'same scene, same numbers');
+  assert.equal(staticProblems(seeded, 'c', 4).length, 0);
+  const perFrame = html.replace('paused: true', 'paused: true, onUpdate() { Math.random(); }');
+  assert.match(staticProblems(seedRandom(perFrame, 'c'), 'c', 4).join(), /no Date\.now, Math\.random/);
 });
 
 await step('fonts: a workhorse family is not the display face unless asked; the mood list is offered', async () => {

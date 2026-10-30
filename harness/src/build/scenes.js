@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { readSection } from '../tools/skill-tools.js';
+import { NONDETERMINISTIC } from '../tools/registry-tools.js';
 import { fallbackScene, skeleton } from './scene-files.js';
 
 const BOX_SIZE = { top: [1, 0.3], bottom: [1, 0.22], corner: [0.32, 0.16], full: [1, 1] };
@@ -39,7 +40,7 @@ The file must follow the contract below exactly:
 - Everything inside one <template>. Its root element is <div id="root" data-composition-id="<scene id>">. Style the root as #root (never by class) and give it position:absolute; inset:0.
 - One paused GSAP timeline, registered last: window.__timelines["<scene id>"] = tl. gsap is already loaded globally.
 - Every timed element has class="clip", data-start and data-duration in seconds relative to the scene start, inside the scene's duration. Animate children of a .clip (or its opacity), never display/visibility/autoAlpha. Use fromTo, never from.
-- No Date.now(), Math.random(), fetch, timers, or repeat: -1. Everything visible is a function of timeline time.
+- No Date.now(), fetch, timers, or repeat: -1. Everything visible is a function of timeline time. Scatter (confetti, particles) may use Math.random() while you build the timeline, never inside onUpdate or a ticker: code seeds it so every render matches.
 - Ids unique and prefixed "<scene id>-".
 - Sizes relative to the box: #root has container-type: size, so use cqw/cqh/cqmin for type and spacing (the box size is in the task).
 - Colours and fonts only through the theme tokens: var(--bg) var(--fg) var(--muted) var(--surface) var(--line) var(--accent) var(--accent-2) var(--accent-soft) var(--font-display) var(--font-body). No other colour values. Never make text the ground colour.
@@ -104,7 +105,7 @@ export function staticProblems(html, id, duration) {
   if (!/<template[\s>]/.test(html)) p.push('everything must be inside <template>');
   if (!new RegExp(`<div[^>]*id="root"[^>]*data-composition-id="${id}"|<div[^>]*data-composition-id="${id}"[^>]*id="root"`).test(html)) p.push(`root must be <div id="root" data-composition-id="${id}">`);
   if (!html.includes(`__timelines["${id}"]`)) p.push(`register the timeline: window.__timelines["${id}"] = tl`);
-  if (/Date\.now|Math\.random|fetch\(|setTimeout|setInterval|repeat:\s*-1/.test(html)) p.push('no Date.now, Math.random, fetch, timers or repeat:-1');
+  if (NONDETERMINISTIC.test(html)) p.push('no Date.now, Math.random, fetch, timers or repeat:-1');
   if (/<link[^>]+href=|<script[^>]+src=/.test(html)) p.push('no external files (link/script src); gsap is already loaded');
   for (const m of html.matchAll(/data-start="([\d.]+)"[^>]*data-duration="([\d.]+)"/g)) {
     if (Number(m[1]) + Number(m[2]) > duration + 0.05) { p.push(`a clip runs to ${Number(m[1]) + Number(m[2])}s, past the scene's ${duration}s`); break; }
@@ -125,12 +126,23 @@ export function ensureRegistered(html, id) {
   return `${html.slice(0, end)}  window.__timelines["${id}"] = ${tl};\n  ${html.slice(end)}`;
 }
 
+// Scatter (confetti, particles, jitter) is a fair use of randomness when it is drawn once, while the
+// timeline is built: code swaps Math.random() for a generator seeded by the scene id, so every render
+// draws the same numbers. Calls inside per-frame callbacks stay a problem for the writer to fix.
+export function seedRandom(html, id) {
+  if (!html || !/Math\.random\(\)/.test(html) || /onUpdate|ticker|requestAnimationFrame/.test(html)) return html;
+  const seed = [...String(id)].reduce((h, c) => (Math.imul(h ^ c.charCodeAt(0), 16777619) >>> 0), 2166136261);
+  const rng = `const __seeded = ((a) => () => { a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; })(${seed});`;
+  return html.replace(/(<script\b[^>]*>)([\s\S]*?)(<\/script>)/g, (all, open, body, close) =>
+    (/Math\.random\(\)/.test(body) ? `${open}\n  ${rng}${body.replace(/Math\.random\(\)/g, '__seeded()')}${close}` : all));
+}
+
 export async function writeScene(scene, ctx, { problems = null, current = null } = {}) {
   const { system, user } = scenePacket(scene, ctx);
   const repair = problems ? `\n\n<problems>\n${problems.map((x) => `- ${x}`).join('\n')}\n</problems>\n\n<current-file>\n${current}\n</current-file>\n\nFix every problem and reply with the whole corrected file.` : '';
   const reply = await ctx.ask(system, user + repair, { label: `${problems ? 'repair' : 'write'} ${scene.id}` });
   const html = typeof reply?.html === 'string' ? reply.html.trim() : null;
-  return ensureRegistered(html, scene.id);
+  return seedRandom(ensureRegistered(html, scene.id), scene.id);
 }
 
 export function findingsFor(check, file) {

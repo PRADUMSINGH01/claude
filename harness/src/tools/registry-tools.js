@@ -55,6 +55,9 @@ export async function catalogSearch(ws, { query, type, tag, limit = 12 }) {
 
 // Installs an item into a scratch project (not the film's) to read what it exposes. Cached per job.
 // Each item's registry-item.json (a few KB) lists its variables; no install, no asset downloads.
+// What a written scene may not contain (scenes.js contract): renders must repeat frame for frame.
+export const NONDETERMINISTIC = /Date\.now|Math\.random|fetch\(|setTimeout|setInterval|repeat:\s*-1/;
+
 async function fetchManifest(name) {
   const safe = String(name).replace(/[^a-z0-9-]/gi, '');
   for (const dir of ['blocks', 'components']) {
@@ -63,14 +66,17 @@ async function fetchManifest(name) {
       const res = await fetch(`${base}/registry-item.json`, { signal: AbortSignal.timeout(10_000) });
       if (!res.ok) continue;
       const m = await res.json();
-      // Some manifests omit variables; the composition file declares them.
-      if (!m.variables) {
-        const comp = (m.files ?? []).find((f) => f.type === 'hyperframes:composition' || /\.html$/.test(f.path));
-        if (comp) {
-          const html = await fetch(`${base}/${comp.path}`, { signal: AbortSignal.timeout(15_000) });
-          if (html.ok) {
+      // The composition file: variables when the manifest omits them, and whether its script is
+      // deterministic (a component's source is merged into written scenes, which must be).
+      const comp = (m.files ?? []).find((f) => f.type === 'hyperframes:composition' || /\.html$/.test(f.path));
+      if (comp) {
+        const html = await fetch(`${base}/${comp.path}`, { signal: AbortSignal.timeout(15_000) }).catch(() => null);
+        if (html?.ok) {
+          const src = await html.text();
+          m.nondeterministic = NONDETERMINISTIC.test(src);
+          if (!m.variables) {
             try {
-              m.variables = JSON.parse(/data-composition-variables='([^']*)'/.exec(await html.text())?.[1] ?? '[]');
+              m.variables = JSON.parse(/data-composition-variables='([^']*)'/.exec(src)?.[1] ?? '[]');
             } catch {
               m.variables = [];
             }
@@ -99,7 +105,7 @@ async function scratchManifest(ws, name) {
   } catch {
     /* none */
   }
-  return { type: res.json.type, duration: Number(/data-duration="([\d.]+)"/.exec(src)?.[1] ?? 0) || null, variables };
+  return { type: res.json.type, duration: Number(/data-duration="([\d.]+)"/.exec(src)?.[1] ?? 0) || null, variables, nondeterministic: NONDETERMINISTIC.test(src) };
 }
 
 // Options come as plain values or as { value, label }; the plan sets values.
@@ -130,6 +136,7 @@ export async function inspectItem(ws, name) {
     bakedMedia: (m.files ?? []).map((f) => f.path ?? f).filter((p) => /\.(webp|png|jpe?g|gif|avif|mp4|webm|mov|glb|gltf)$/i.test(p)),
     // three.js / WebGL scenes: software rendering (no GPU) stalls on them.
     needsGpu: (m.tags ?? []).some((t) => /^(three-js|webgl|3d-object)$/i.test(t)),
+    nondeterministic: Boolean(m.nondeterministic),
     description: m.description ?? '',
   };
   cache[name] = info;

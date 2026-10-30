@@ -1,0 +1,7 @@
+15 second motion-graphics piece for a fictional tech brand 'Lumen', 1920x1080, NO audio.
+Look: dark ground #07101F, type #F0EBDE, accent #5560E5, display font Inter.
+Background for the whole film: an animated aurora/gradient shader from the registry, alive the entire 15 s, under every beat.
+Beat 1 (0-5 s): headline "Light, in motion" with kinetic weight-wave type, centered.
+Beat 2 (5-10 s): headline "Design that moves", kinetic type, centered.
+Beat 3 (10-15 s): wordmark "LUMEN", large, centered, calm hold.
+No photos, no people, no stock images.

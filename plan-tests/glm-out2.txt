@@ -1,0 +1,24 @@
+
+■ understand  (glm/glm-5.3-flash)
+  ↻ repair understand: beat end-card is 4s but its copy needs 4.3s to be read; lengthen it (take time from other beats) or merge it
+  "Inkwell Launch Promo" — launch, 1920x1080, 20s, audio sfx
+  look: ground #FAF6F0, ink #2E2A26, accent #E2673F  fonts: Poppins
+     0–3.5s  meet-inkwell: "Meet Inkwell"  [bold app name reveal]
+   3.5–7s  write-anywhere: "Write anywhere"  [handwriting stroke animation]
+     7–11.5s  find-anything: "Find anything in seconds"  [instant search demo]
+  11.5–15s  share-one-tap: "Share with one tap"  [share tap ripple demo]
+    15–20s  end-card: "Inkwell — notes that keep up" "Free on iOS and Android"  [end card logo and availability]
+  assumed: No beat timings were given, so beats were placed to fit the 20 seconds; the end card gets 5 s (needs at least 4.3 s for its 11-word copy) and the freed time is taken from the shorter feature beats
+  assumed: 30 fps applied as the default since the request was silent on frame rate
+  assumed: 'Lots of white space' is treated as a warm off-white ground colour, not a background layer
+  assumed: Palette and font (Poppins; warm off-white ground, dark warm ink, coral accent) chosen to match 'warm, friendly, modern' as none were specified
+  assumed: Both end-card lines are held together in a single beat rather than sequenced
+
+■ shortlist
+  meet-inkwell: (no block fits → hand-build)   components: panel-reveal, skeleton-reveal, svg-mask-reveal
+  write-anywhere: (no block fits → hand-build)   components: svg-stroke-trace, hw-box-label, hw-arrow
+  find-anything: (no block fits → hand-build)   components: offset-path-traveler, tracing-beam, icon-morph-beat
+  share-one-tap: (no block fits → hand-build)   components: gesture-tap, press-ripple, touch-indicator
+  end-card: extruded-logo, orbit-card   components: logo-brand-close, logo-wall, logo-sting
+
+■ plan

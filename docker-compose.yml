@@ -1,0 +1,74 @@
+# Usage on the VPS:
+#   docker compose build
+#   docker compose run --rm --entrypoint node harness bin/selftest.js     # no model calls
+#   docker compose run --rm harness run "A 20 second launch film for ..." --theme coral
+#   docker compose up -d backend caddy                                   # run the API server behind TLS
+services:
+  harness:
+    build: .
+    image: motion-studio-harness
+    env_file: .env
+    volumes:
+      - ./jobs:/app/jobs
+    shm_size: 2gb
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    # Root in the container needs only these: chown job folders, read them back, and drop to per-job uids.
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL]
+    pids_limit: 2048
+    mem_limit: 8g
+    cpus: 4
+
+  # The HTTP API that the Next.js frontend talks to. Same image as `harness` (it imports
+  # ../harness/src/orchestrator.js in-process), just a different entrypoint + always-on restart.
+  backend:
+    build: .
+    image: motion-studio-harness
+    entrypoint: ["node", "/app/server/index.mjs"]
+    env_file: .env
+    environment:
+      PORT: "8080"
+      HOST: "0.0.0.0"
+      PUBLIC_API_URL: "https://motion-studio-api.eastus2.cloudapp.azure.com"
+      MAX_CONCURRENT_JOBS: "${MAX_CONCURRENT_JOBS:-3}"
+      PLANNER_MAX_TURNS: "${PLANNER_MAX_TURNS:-8}"
+      BUILDER_MAX_TURNS: "${BUILDER_MAX_TURNS:-35}"
+      CRITIC_MAX_TURNS: "${CRITIC_MAX_TURNS:-8}"
+      FIXER_MAX_TURNS: "${FIXER_MAX_TURNS:-15}"
+      REVIEW_ROUNDS: "${REVIEW_ROUNDS:-1}"
+    volumes:
+      - ./jobs:/app/jobs
+      - ./server/index.mjs:/app/server/index.mjs
+      - ./server/data:/app/server/data
+      - ./harness/src:/app/harness/src
+    expose:
+      - "8080"
+    shm_size: 2gb
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL]
+    pids_limit: 2048
+    mem_limit: 8g
+    cpus: 4
+    restart: unless-stopped
+
+  # Automatic HTTPS (Let's Encrypt) in front of `backend`, using the VM's Azure DNS label.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [backend]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

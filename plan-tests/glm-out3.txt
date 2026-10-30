@@ -1,0 +1,40 @@
+
+■ understand  (glm/glm-5.3-flash)
+  "Stop Scrolling — kinetic quote" — vertical, 1080x1920, 12s, audio none
+  look: ground #0B0B0F, ink #FFFFFF, accent #FFD60A  fonts: Anton
+     0–3s  hook-stop-scrolling: "Stop scrolling."  [hook slams in top]
+     3–9s  quote-word-by-word: "Small steps every day beat big plans someday."  [word by word reveal]
+     9–12s  handle-bottom: "@dailyframes"  [handle pops in bottom]
+  assumed: fps set to 30 since the request was silent on frame rate
+  assumed: 'Then' read as sequence: hook, quote, and handle appear one after another and hand off; nothing was asked to persist, so overlays is empty
+  assumed: Chose near-black ground #0B0B0F, white ink, yellow accent #FFD60A and the Anton font since the prompt gave no palette or typeface
+  assumed: Dark background treated as a ground colour, not a background layer
+  assumed: No title card invented — all copy was supplied by the request
+
+■ shortlist
+  hook-stop-scrolling: (no block fits → hand-build)   components: top-down-letters, caption-kinetic-slam, headline-slam
+  quote-word-by-word: (no block fits → hand-build)   components: panel-reveal, per-word-crossfade, per-word-rise
+  handle-bottom: (no block fits → hand-build)   components: bottom-up-letters, caption-emoji-pop, number-pop-in
+
+■ plan
+[plan] glm reply was cut off at 16000 output tokens; retrying with 32000
+
+■ judge
+  main          0–3s  hook-stop-scrolling: hand-built + top-down-letters  vars {"text":"Stop scrolling.","distance":"standard","tone":"ink"}
+  main          3–9s  quote-word-by-word: hand-built + per-word-rise  vars {"text":"Small steps every day beat big plans someday.","cues":"0.5,0.9,1.3,1.7,2.1,2.5,2.
+  main          9–12s  handle-bottom: hand-built + bottom-up-letters  vars {"unit":"letter","direction":"up","travel":"standard"}
+  theme: {"ground":"#0B0B0F","ink":"#FFFFFF","accent":"#FFD60A"}
+
+■ rating 10/10
+  ✓ copy kept verbatim (2/2) 3/3
+  ✓ beat and overlay timing match the brief (1/1) 3/3
+  ✓ passes plan checks (blocks exist and fit, layers) (1/1) ok
+  ✓ theme and audio as requested (1/1) ok
+  ✓ background layer as requested and visible (2/2) ok
+  ✓ fonts work with the chosen blocks (1/1) ok
+  ✓ scenes suit their beats and the mood (judge) (2/2) avg fit 5.0/5
+
+■ tokens: 4 calls, 7.1k in / 31.1k out
+
+Saved: E:\claude\motion-studio\jobs\20261028174818-474d66\harness (brief.json, shortlist.json, plan.json, rating.json)
+exit 0

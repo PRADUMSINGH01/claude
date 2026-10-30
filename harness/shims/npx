@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Skills say "npx hyperframes …"; route that to the pinned local CLI instead of downloading one.
+args=("$@")
+while [[ ${#args[@]} -gt 0 && ${args[0]} == -* ]]; do args=("${args[@]:1}"); done
+if [[ ${#args[@]} -gt 0 && ( ${args[0]} == hyperframes || ${args[0]} == hyperframes@* ) ]]; then
+  exec hyperframes "${args[@]:1}"
+fi
+for p in $(type -ap npx); do
+  [[ "$p" != "$0" && "$p" != */shims/npx ]] && exec "$p" "$@"
+done
+echo "npx: not available in the sandbox" >&2; exit 127

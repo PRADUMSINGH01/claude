@@ -1,0 +1,56 @@
+
+■ understand  (glm/glm-5.3-flash)
+  "How many of us are there?" — data, 1920x1080, 20s, audio none
+  look: ground #F6F3EC, ink #151515, accent #B23A2E  fonts: Playfair Display, Inter
+     0–3.5s  title-card: "How many of us are there?"  [serif title card reveal]
+   3.5–6s  milestone-1804: "1 billion in 1804"  [timeline dot 1804]
+     6–8.5s  milestone-1927: "2 billion in 1927"  [timeline dot 1927]
+   8.5–11s  milestone-1974: "4 billion in 1974"  [timeline dot 1974]
+    11–14s  milestone-2022: "8 billion on 15 Nov 2022"  [timeline dot 2022]
+    14–17.5s  projection-2080s: "projected peak about 10.3 billion in the mid-2080s"  [projection curve reveal]
+  17.5–20s  closing-line: "Still growing, but slowing."  [closing line hold]
+  overlay 3.5–20s source-line (bottom): "Source: UN World Population Prospects 2024"
+  assumed: fps set to 30 (request was silent)
+  assumed: Palette and typefaces chosen (editorial off-white ground, near-black ink, red accent, serif display + sans) since the request named no colours or fonts
+  assumed: Source rendered as 'Source: UN World Population Prospects 2024' as a persistent bottom overlay from the first data beat to the end
+  assumed: Figure copy uses the request's exact figure phrasings, one milestone per beat
+  assumed: Milestones visualised as dots on a simple timeline, a faceless graphic device, since no people or photos are allowed
+  assumed: No extra title card invented; the given title is the opening beat
+
+■ shortlist
+  title-card: canopy-part-title, glass-shard-title, wireframe-portal-title, orbit-card   components: spotlight-card, titlecard-calm, pull-back-reveal
+  milestone-1804: orbit-card   components: beat-timeline, svg-line-draw-loader, hw-boil
+  milestone-1927: orbit-card   components: beat-timeline, svg-line-draw-loader, hw-boil
+  milestone-1974: orbit-card   components: beat-timeline, svg-line-draw-loader, hw-boil
+  milestone-2022: orbit-card   components: beat-timeline, svg-line-draw-loader, hw-boil
+  projection-2080s: (no block fits → hand-build)   components: cut-the-curve, ascii-trail-reveal, panel-reveal
+  closing-line: exploded-stack, extruded-logo   components: line-by-line-slide, cta-lockup, line-swap
+  source-line: (no block fits → hand-build)   components: comparison-split, ascii-render-pass, before-after-wipe
+
+■ plan
+[llm] glm/glm-5.3-flash attempt 1 failed after 306s:  Request timed out. Node.js fetch timed out waiting for response headers; configure a matching undici fetch and fetchOptions.dispatcher with an Agent whose heade — retrying in 2s
+
+■ judge
+  main          0–3.5s  title-card: hand-built + titlecard-calm  vars {"headline":"How many of us are there?","kicker":""}
+  main        3.5–6s  milestone-1804: hand-built + svg-line-draw-loader  
+  main          6–8.5s  milestone-1927: hand-built  
+  main        8.5–11s  milestone-1974: hand-built  
+  main         11–14s  milestone-2022: hand-built  
+  main         14–17.5s  projection-2080s: hand-built  
+  main       17.5–20s  closing-line: hand-built  
+  overlay     3.5–20s  source-line: hand-built  
+  theme: {"ground":"#F6F3EC","ink":"#151515","accent":"#B23A2E"}
+
+■ rating 10/10
+  ✓ copy kept verbatim (2/2) 8/8
+  ✓ beat and overlay timing match the brief (1/1) 8/8
+  ✓ passes plan checks (blocks exist and fit, layers) (1/1) ok
+  ✓ theme and audio as requested (1/1) ok
+  ✓ background layer as requested and visible (2/2) ok
+  ✓ fonts work with the chosen blocks (1/1) ok
+  ✓ scenes suit their beats and the mood (judge) (2/2) avg fit 5.0/5
+
+■ tokens: 3 calls, 8.7k in / 21.4k out
+
+Saved: E:\claude\motion-studio\jobs\20261028180349-d4e205\harness (brief.json, shortlist.json, plan.json, rating.json)
+exit 0

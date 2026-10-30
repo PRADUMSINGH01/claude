@@ -1,0 +1,44 @@
+
+■ understand  (azure/gpt-5-mini)
+  "Inkwell Launch Promo" — launch, 1920x1080, 20s, audio sfx
+  look: ground #FFFFFF, ink #111827, accent #FF8A65  fonts: Inter
+     0–2s  meet-inkwell: "Meet Inkwell"  [bold entrance, centered]
+     2–6s  write-anywhere: "Write anywhere"  [simple line, subtle motion]
+     6–11s  find-anything: "Find anything in seconds"  [feature highlight, light reveal]
+    11–15s  share-one-tap: "Share with one tap"  [tap animation, micro-sfx]
+    15–20s  end-card: "Inkwell — notes that keep up" "Free on iOS and Android"  [end card, logo and CTA]
+  assumed: FPS default applied as 30 because not specified in the prompt
+  assumed: Used Inter as a clean, modern UI font choice where the prompt did not specify fonts
+  assumed: Background layer not wanted; 'lots of white space' implemented via white ground color (#FFFFFF) and minimal UI elements
+  assumed: All provided copy is shown verbatim; no additional copy or title card was invented
+
+■ shortlist
+  meet-inkwell: (no block fits → hand-build)   components: caption-gradient-fill, caption-emoji-pop, caption-kinetic-slam
+  write-anywhere: orbit-card, glass-shard-title, cuboid-carousel, canopy-part-title   components: line-by-line-slide, svg-line-draw-loader, line-swap
+  find-anything: orbit-card   components: caption-highlight, inline-highlight, shimmer-sweep
+  share-one-tap: (no block fits → hand-build)   components: micro-transitions, gesture-tap, terminal-simulator
+  end-card: extruded-logo, orbit-card   components: cta-lockup, cta-close, logo-brand-close
+
+■ plan
+
+■ judge
+  main          0–2s  meet-inkwell: hand-built + caption-kinetic-slam  
+  main          2–6s  write-anywhere: hand-built + line-swap  vars {"line_a":"Write anywhere","line_b":"Write anywhere","underline_word":"anywhere","swap_at"
+  main          6–11s  find-anything: hand-built + shimmer-sweep  
+  main         11–15s  share-one-tap: hand-built + gesture-tap, micro-transitions  vars {"tap_label":"Share","response_label":"Sent"}
+  main         15–20s  end-card: hand-built + logo-brand-close, cta-lockup  vars {"wordmark":"Inkwell","tagline":"notes that keep up","action_line":"Free on iOS and Androi
+  theme: {"ground":"#FFFFFF","ink":"#111827","accent":"#FF8A65"}
+
+■ rating 10/10
+  ✓ copy kept verbatim (2/2) 6/6
+  ✓ beat and overlay timing match the brief (1/1) 5/5
+  ✓ passes plan checks (blocks exist and fit, layers) (1/1) ok
+  ✓ theme and audio as requested (1/1) ok
+  ✓ background layer as requested and visible (2/2) ok
+  ✓ fonts work with the chosen blocks (1/1) ok
+  ✓ scenes suit their beats and the mood (judge) (2/2) avg fit 5.0/5
+
+■ tokens: 3 calls, 6.5k in / 4.8k out
+
+Saved: E:\claude\motion-studio\jobs\20261028165439-19d372\harness (brief.json, shortlist.json, plan.json, rating.json)
+exit 0

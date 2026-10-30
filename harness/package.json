@@ -1,0 +1,21 @@
+{
+  "name": "motion-studio-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-agent HyperFrames video harness (planner, builder, critic, fixer) on the OpenAI SDK, reading .agents/skills progressively.",
+  "bin": {
+    "motion": "bin/motion.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "motion": "node --env-file-if-exists=../.env bin/motion.js",
+    "selftest": "node --env-file-if-exists=../.env bin/selftest.js"
+  },
+  "dependencies": {
+    "hyperframes": "0.8.211",
+    "openai": "^7.45.1"
+  }
+}

@@ -1,0 +1,49 @@
+
+■ understand  (azure/gpt-5-mini)
+  "How many of us are there?" — data, 1920x1080, 20s, audio none
+  look: ground #FFFFFF, ink #111827, accent #0066CC  fonts: Inter
+     0–3s  title-card: "How many of us are there?"  [bold title, centered]
+     3–8s  early-milestones: "1 billion — 1804" "2 billion — 1927"  [two-line facts, left aligned]
+     8–12s  late-20th-milestones: "4 billion — 1974" "8 billion — 15 Nov 2022"  [two-line facts, timeline feel]
+    12–15s  projection: "Projected peak ≈10.3 billion — mid‑2080s"  [single projection line, emphasis]
+    15–17.8s  source: "Source: UN World Population Prospects 2024"  [small caption, bottom]
+  17.8–20s  end-line: "Still growing, but slowing."  [closing line, centered]
+  assumed: Used the requested duration 20s (not a default).
+  assumed: Chose colors (#FFFFFF ground, #111827 ink, #0066CC accent) and the Inter font because the prompt requested a clean editorial look but gave no exact colors or font.
+  assumed: fps defaulted to 30 because none was specified (recorded here).
+  assumed: Background.wanted is false because the brief requests a clean editorial look without photos or extra visual layers.
+  assumed: Grouped milestones onto shared beats to fit readable on-screen times within the 20s total while keeping each beat long enough to read.
+  assumed: Where the prompt was silent about exact layout/animation, text is presented as simple, high-contrast typographic frames (title, left-aligned milestone lists, small source caption, centered closing line).
+
+■ shortlist
+  title-card: glass-shard-title, canopy-part-title, wireframe-portal-title   components: notes-typing, cursor-text-select, push-in
+  early-milestones: (no block fits → hand-build)   components: line-by-line-slide, svg-line-draw-loader, line-swap
+  late-20th-milestones: (no block fits → hand-build)   components: svg-line-draw-loader, line-by-line-slide, beat-timeline
+  projection: orbit-card   components: caption-editorial-emphasis, mk-emphasis-type, line-by-line-slide
+  source: (no block fits → hand-build)   components: bottom-up-letters, caption-pill-karaoke, caption-particle-burst
+  end-line: (no block fits → hand-build)   components: line-by-line-slide, svg-line-draw-loader, cta-lockup
+
+■ plan
+
+■ judge
+  main          0–3s  title-card: glass-shard-title  vars {"headline":"How many of us are there?","flyInTime":2.3,"stagger":0.27,"sizeVariance":0.35
+  main          3–8s  early-milestones: hand-built + line-by-line-slide  vars {"layoutWidth":"60%","leftMargin":"8%","fontFamily":"Inter","titleSize":"56px","lineSize":
+  main          8–12s  late-20th-milestones: hand-built + beat-timeline  vars {"labels":"4 billion — 1974|8 billion — 15 Nov 2022","beatCount":2,"interval":0.9,"fontFam
+  main         12–15s  projection: hand-built + caption-editorial-emphasis, mk-emphasis-type  vars {"fontFamily":"Inter","featureSize":"52px","emphasisSize":"110px","emphasisOpacity":0.06,"
+  main         15–17.8s  source: hand-built + bottom-up-letters  vars {"fontFamily":"Inter","captionSize":"20px","captionWeight":400,"bottomMargin":"36px","dire
+  main       17.8–20s  end-line: hand-built + line-by-line-slide  vars {"fontFamily":"Inter","textSize":"46px","weight":600,"direction":"left","stagger":0.06}
+  theme: {"ground":"#FFFFFF","ink":"#111827","accent":"#0066CC"}
+
+■ rating 8.9/10
+  ✓ copy kept verbatim (2/2) 8/8
+  ✓ beat timing matches the brief (1/1) 6/6
+  ✓ passes plan checks (blocks exist and fit, layers) (1/1) ok
+  ✓ theme and audio as requested (1/1) ok
+  ✓ background layer as requested and visible (2/2) ok
+  ✓ fonts work with the chosen blocks (1/1) ok
+  ✗ blocks suit their beats (judge) (0.9/2) title-card fit 2/5: The glass-shard visual is more dramatic than the brief’s calm, editorial tone, though it does deliver a bold centered headline as requested.
+
+■ tokens: 3 calls, 5.1k in / 5.8k out
+
+Saved: E:\claude\motion-studio\jobs\20261028163105-e2066c\harness (brief.json, shortlist.json, plan.json, rating.json)
+exit 0

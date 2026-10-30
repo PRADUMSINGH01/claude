@@ -1,0 +1,41 @@
+
+■ understand  (azure/gpt-5-mini)
+  "coral-quote-card" — other, 1920x1080, 10s, audio none
+  look: coral  fonts: Serif Display
+     0–3s  quote-reveal: "Design is how it works."  [fade in quote]
+     3–5s  attribution-reveal: "— Steve Jobs"  [slide in attribution]
+     5–10s  hold-still: "Design is how it works." "— Steve Jobs"  [still hold]
+  assumed: Converted the named theme "coral" to look.preset = "coral" and left specific hex colors empty because no hex values were provided.
+  assumed: Default fps applied (30) because fps was not specified.
+  assumed: Selected a neutral serif display font "Serif Display" because no font was specified.
+  assumed: No background layer requested; background.wanted set to false.
+  assumed: Three beats: reveal quote, reveal attribution, then a still hold to fill the 10s total.
+  assumed: All defaults applied have been recorded here.
+
+■ shortlist
+  quote-reveal: frost-sequence-camera-orbit, split-flap-board   components: staggered-fade-up, fade-through, testimonial-card
+  attribution-reveal: ai-answer-rank   components: tabs-slide-indicator, line-by-line-slide, page-slide
+  hold-still: exploded-stack, extruded-logo   components: drift-hold, gloss-sweep, logo-sting
+
+■ plan
+  ↻ repair plan: SPEC.md uses colours outside the "coral" preset (#FF6F61). Either use only #E85D5D, #D44A4A, #F5F0E8, #E8E0D4, #1A1A1A, #6B6B6B, #B0B0B0, #FFFFFF, or, if the film needs your colours (e.g. a dark look on a light preset), drop the preset and give a custom theme {name, colors, fonts} with them.
+
+■ judge
+  main          0–3s  quote-reveal: hand-built + staggered-fade-up  vars {"words":"Design is how it works.","direction":"up","distance":"standard","tone":"ink"}
+  main          3–5s  attribution-reveal: hand-built + line-by-line-slide  vars {"direction":"left","size":"standard","tone":"ink","density":"standard"}
+  main          5–10s  hold-still: hand-built + drift-hold  vars {"text":"Design is how it works.\n— Steve Jobs","intensity":"standard"}
+  theme: coral
+
+■ rating 8/10
+  ✓ copy kept verbatim (2/2) 4/4
+  ✓ beat timing matches the brief (1/1) 3/3
+  ✓ passes plan checks (blocks exist and fit, layers) (1/1) ok
+  ✓ theme and audio as requested (1/1) ok
+  ✓ background layer as requested and visible (2/2) ok
+  ✓ fonts work with the chosen blocks (1/1) ok
+  ✗ blocks suit their beats (judge) (0/2) not judged
+
+■ tokens: 3 calls, 11.2k in / 5.3k out
+
+Saved: E:\claude\motion-studio\jobs\20261028163908-2431e6\harness (brief.json, shortlist.json, plan.json, rating.json)
+exit 0

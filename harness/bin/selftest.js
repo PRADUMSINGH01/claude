@@ -161,8 +161,24 @@ await step('registry first: vetting, several queries per beat, use-or-justify, d
   assert.match(errs, /a: data-chart shows its demo data unless series hold the beat's figures/);
   assert.match(errs, /b: uses no registry item though its shortlist has logo-sting, svg-mask-reveal/);
   assert.match(errs, /c: panel-reveal is not in this beat's block shortlist/);
+  // Option values from the item's list; an item far shorter than its scene freezes.
+  const sl2 = { blocks: { w: [it('weight-wave', { textVars: ['text'], duration: 6, controls: [{ id: 'accent', options: ['green', 'blue'] }] })] }, components: {} };
+  const e3 = planChecks({ theme: {}, scenes: [{ id: 'w', start: 0, duration: 12, text: ['Tidepool'], block: 'weight-wave', vars: { text: 'Tidepool', accent: 'teal' } }] }, { background: { wanted: false } }, sl2).join('\n');
+  assert.match(e3, /weight-wave\.accent is "teal"; use one of green, blue/);
+  assert.match(e3, /runs 6s but the scene is 12s, so it holds still for 6s/);
+  // A copy-less picture beat may be hand-built without a reason.
+  assert.equal(planChecks({ theme: {}, scenes: [{ id: 'b', start: 0, duration: 4, text: [], block: null, vars: {} }] }, { background: { wanted: false } }, sl).length, 0);
   const justified = planChecks({ theme: {}, decisions: ['b: no registry item fits because the beat is a bare hold'], scenes: [scenes[1]] }, { background: { wanted: false } }, sl);
   assert.equal(justified.length, 0);
+});
+
+await step('brief: a long beat splits into a copy beat and picture beats, unless the request gives timings', async () => {
+  const { checkBrief } = await import('../src/plan.js');
+  const brief = { format: { duration: 25 }, look: {}, background: { wanted: false }, beats: [{ id: 'a', start: 0, end: 12, copy: ['Tidepool'] }, { id: 'b', start: 12, end: 25, copy: ['Know before you paddle out'] }] };
+  const errs = checkBrief(brief, 'A launch film for "Tidepool" and "Know before you paddle out"').join('\n');
+  assert.match(errs, /beat a is 12s, one moment held too long; split it/);
+  assert.match(errs, /beat b is 13s/);
+  assert.equal(checkBrief(brief, 'Beat 1 (0-12 s): "Tidepool". Beat 2 (12-25 s): "Know before you paddle out"').filter((e) => /held too long/.test(e)).length, 0);
 });
 
 await step('plan-only A–E: judge every scene, component vars, brand items, no split/repeated copy, overlays', async () => {
@@ -318,7 +334,7 @@ await step('brief: a repeated line is kept once (names on the end card); a docke
   dedupeCopy(b);
   assert.deepEqual(b.beats.map((x) => x.copy), [['Know before you paddle out'], [], ['Tidepool']]);
   const P = 'A 25 second launch film for Tidepool. On screen: "Tidepool" and "Know before you paddle out".';
-  assert.deepEqual(checkBrief(b, P), []);
+  assert.deepEqual(checkBrief(b, P).filter((e) => !/held too long/.test(e)), []); // its 10 s beats are the long-beat test's job
   const docked = { ...b, overlays: [{ id: 'logo', start: 0, end: 25, copy: ['Tidepool'], position: 'corner' }] };
   assert.match(checkBrief(docked, P).join(), /docked logo/);
   assert.doesNotMatch(checkBrief(docked, `${P} Keep the logo in the corner.`).join(), /docked logo/);

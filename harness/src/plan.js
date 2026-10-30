@@ -77,6 +77,9 @@ export function dedupeCopy(brief) {
 // The request asks for something to stay on screen (a logo bug, a watermark, a persistent line).
 const ASKS_PERSISTENT = /\b(logo|watermark|bug|corner|throughout|persistent|the whole (film|video)|keep .{0,40}on screen|stays? on screen|stay visible)\b/i;
 
+// Longest beat (seconds) before it must split, unless the request gives its own timings.
+const MAX_BEAT = 8;
+
 export function checkBrief(brief, prompt, options = {}) {
   const errs = [];
   const holders = [...(brief.beats ?? []), ...(brief.overlays ?? [])];
@@ -149,6 +152,11 @@ export function checkBrief(brief, prompt, options = {}) {
     for (const c of b.copy ?? []) if (INSTRUCTION_WORDS.test(c)) errs.push(`beat ${b.id} copy "${c}" reads like an instruction, not on-screen text; put only the words the viewer sees`);
     const floor = readFloor(b.copy ?? []);
     if (floor && b.end - b.start < floor - 0.01) errs.push(`beat ${b.id} is ${+(b.end - b.start).toFixed(2)}s but its copy needs ${floor.toFixed(1)}s to be read; lengthen it (take time from other beats) or merge it`);
+    // One moment stretched over a long beat is a dead stretch (review.md: >3 s with nothing changing).
+    const longest = Math.max(MAX_BEAT, (floor || 0) + 3);
+    if (!SCRIPTED.test(prompt) && b.end - b.start > longest + 0.01) {
+      errs.push(`beat ${b.id} is ${+(b.end - b.start).toFixed(2)}s, one moment held too long; split it: its copy stays whole in one beat of at least its read time, and the rest becomes beats with no copy whose intent says what the viewer sees (the product, the place, the payoff)`);
+    }
   }
   if (brief.background?.wanted && !LAYER_WORDS.test(prompt)) {
     errs.push('background.wanted is true but the request only names a background colour; set it in look.colors.ground and set background.wanted false');
@@ -392,7 +400,10 @@ Rules:
 - For a "handoff" transition there is no scene: the outgoing beat's motion ends with the exit and the next beat's motion starts with the matching entrance (e.g. whip: smear out 0.2 s / land blurred and sharpen 0.13 s). Say this in both scenes' motion.
 - vars holds only variable ids that the chosen block or components list. A hand-built scene with no components has empty vars: its layout, sizes and fonts go in build.
 - Build from the registry wherever it fits: every scene uses a block from its beat's shortlist, or is hand-built WITH at least one component from that beat's component shortlist. Pick BY DESCRIPTION: what it shows must match the beat's intent AND the brief's look.mood (no 3D spectacle for a calm editorial piece, no diagram plates for a wordmark, no chat UI for a headline).
-- A scene with no block and no component is the exception: add "<scene id>: no registry item fits because …" to decisions, naming why each shortlisted item does not fit.
+- A beat with no copy shows a picture (the product, the place, the payoff): use a block only if it shows that picture, else hand-build it (build says the shapes, colours and motion in numbers). A beat with copy may also hand-build its picture and add a component for the text.
+- One item per scene must not outlast its effect: if the scene is more than 5 s longer than its block or component, add a second component or a written move for the rest.
+- Option values (behaviour controls with a fixed list) must be one of the listed options.
+- A scene with copy and no block and no component is the exception: add "<scene id>: no registry item fits because …" to decisions, naming why each shortlisted item does not fit.
 - A hand-built scene lists its components in components; the scene supplies the copy.
 - A data block (variables like series, periods, data, values, labels) shows its demo numbers unless you set those variables to the beat's own figures.
 - Never name a block or component outside the shortlists.
@@ -468,9 +479,24 @@ export function planChecks(plan, brief, sl) {
     }
     // Registry first: a scene whose shortlists had candidates uses one, or says why not.
     const offered = [...(sl.blocks[s.id] ?? []), ...(sl.components[s.id] ?? [])];
-    if (['main', 'overlay'].includes(s.layer ?? 'main') && !s.block && !(s.components ?? []).length && offered.length
+    const hasCopy = (s.text ?? []).some((t) => String(t).trim());
+    if (['main', 'overlay'].includes(s.layer ?? 'main') && hasCopy && !s.block && !(s.components ?? []).length && offered.length
       && !(plan.decisions ?? []).some((d) => String(d).includes(s.id))) {
       errs.push(s.id + ': uses no registry item though its shortlist has ' + offered.map((i) => i.name).join(', ') + '; use one, or add "' + s.id + ': no registry item fits because …" to decisions');
+    }
+    // Option values must be ones the item offers (an unknown one silently becomes its default).
+    for (const i of used) {
+      for (const c of i.controls ?? []) {
+        const v = s.vars?.[c.id];
+        if (v != null && Array.isArray(c.options) && c.options.length && !c.options.map(String).includes(String(v))) {
+          errs.push(s.id + ': ' + i.name + '.' + c.id + ' is "' + v + '"; use one of ' + c.options.join(', '));
+        }
+      }
+    }
+    // A mounted item shorter than its scene freezes on its last frame for the rest.
+    const mounted = s.block ? info[s.block] : (s.components ?? []).length === 1 ? info[s.components[0]] : null;
+    if (mounted?.duration && (s.layer ?? 'main') === 'main' && s.duration - mounted.duration > Math.max(5, readFloor(s.text ?? []) + 2)) {
+      errs.push(s.id + ': ' + mounted.name + ' runs ' + mounted.duration + 's but the scene is ' + s.duration + 's, so it holds still for ' + +(s.duration - mounted.duration).toFixed(1) + 's; add a second component (a written move) for the rest, or pick an item whose length fits');
     }
     // A data block left without the beat's figures renders its demo data.
     for (const i of used) {

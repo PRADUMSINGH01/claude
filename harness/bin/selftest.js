@@ -137,6 +137,34 @@ await step('plan-only checks: instructions are not copy, readable timing, real v
   assert.match(e2, /wants no background layer/);
 });
 
+await step('registry first: vetting, several queries per beat, use-or-justify, data blocks get the figures', async () => {
+  const { unfitReason, beatQueries, planChecks } = await import('../src/plan.js');
+  const item = (o) => ({ ok: true, name: 'x', kind: 'block', textVars: ['title'], imageVars: [], colorVars: [], otherVars: [], tags: [], bakedMedia: [], needsGpu: false, ...o });
+  const opts = { type: 'block', needsText: true, prompt: 'a launch film for a surf app' };
+  assert.equal(unfitReason(item({}), opts), null);
+  assert.match(unfitReason(item({ kind: 'component' }), opts), /is a component, not a block/);
+  assert.match(unfitReason(item({ needsGpu: true }), opts), /needs a GPU/);
+  assert.match(unfitReason(item({ tags: ['title-card', 'leaves'], bakedMedia: ['assets/leaf.webp'] }), opts), /demo pictures/);
+  assert.equal(unfitReason(item({ tags: ['leaves'], bakedMedia: ['assets/leaf.webp'] }), { ...opts, prompt: 'falling leaves title' }), null);
+  assert.match(unfitReason(item({ tags: ['effect', 'cinemagraph', 'photo'] }), opts), /demo pictures/);
+  assert.match(unfitReason(item({ name: 'bad' }), { ...opts, stats: { bad: { kept: 0, failed: 2 } } }), /failed in 2 past builds/);
+  assert.deepEqual(beatQueries({ intent: 'bars grow per year', copy: ['8 billion in 2022'] }, { kind: 'data' }), ['bars grow per year', 'data bars grow per year', 'animated numbers chart']);
+  assert.deepEqual(beatQueries({ intent: 'wordmark lands', copy: ['Tidepool'] }, { kind: 'other' }), ['wordmark lands', 'title wordmark reveal']);
+  const it = (name, o = {}) => ({ name, textVars: [], imageVars: [], colorVars: [], otherVars: [], ...o });
+  const sl = { blocks: { a: [it('data-chart', { textVars: ['series', 'title'] })], b: [it('logo-sting')] }, components: { b: [it('svg-mask-reveal')] } };
+  const scenes = [
+    { id: 'a', start: 0, duration: 4, text: ['1B in 1804'], block: 'data-chart', vars: { title: 'x', series: '[]' } },
+    { id: 'b', start: 4, duration: 4, text: ['Hi'], block: null, components: [], vars: {} },
+    { id: 'c', start: 8, duration: 4, text: ['Yo'], block: 'panel-reveal', vars: {} },
+  ];
+  const errs = planChecks({ theme: {}, scenes }, { background: { wanted: false } }, { ...sl, blocks: { ...sl.blocks, c: [it('wordmark-tiles')] } }).join('\n');
+  assert.match(errs, /a: data-chart shows its demo data unless series hold the beat's figures/);
+  assert.match(errs, /b: uses no registry item though its shortlist has logo-sting, svg-mask-reveal/);
+  assert.match(errs, /c: panel-reveal is not in this beat's block shortlist/);
+  const justified = planChecks({ theme: {}, decisions: ['b: no registry item fits because the beat is a bare hold'], scenes: [scenes[1]] }, { background: { wanted: false } }, sl);
+  assert.equal(justified.length, 0);
+});
+
 await step('plan-only A–E: judge every scene, component vars, brand items, no split/repeated copy, overlays', async () => {
   const { checkBrief, planChecks, ratePlan, blockedForPrompt } = await import('../src/plan.js');
   // C: explicit brand list, matched to real catalog names

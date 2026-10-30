@@ -6,6 +6,7 @@ import { chat } from './llm.js';
 import { SkillLibrary } from './skills/library.js';
 import { readSection } from './tools/skill-tools.js';
 import { catalogSearch, inspectItem, listThemes } from './tools/registry-tools.js';
+import { readStats, retired, standing } from './tools/registry-stats.js';
 import { opaqueOverBackground, plannerHandoff } from './roles/planner.js';
 import { Workspace } from './workspace.js';
 import { resolveLook } from './look.js';
@@ -277,17 +278,60 @@ export const blockedForPrompt = (name, prompt) => Boolean(BRAND_ITEMS[name] && !
 
 const BACKGROUND_KIND = /(background|backdrop|shader|gradient|texture|aurora|noise|pattern|sky|particles)/i;
 
-async function shortlistFor(ws, query, { needsText, type, prompt, background = false, max = 4 }) {
-  const found = await catalogSearch(ws, { query, type, limit: 10 });
+// Tags that say what an item is for, not what it pictures.
+const GENERIC_TAG = /^(text|title|title-card|logo|data|chart|effect|loop|social|motion|3d-motion|transition|overlay|background|card|reveal|kinetic|typography|organic|sweep|depth-of-field|two-headlines|photo|freeze-frame)$/i;
+
+// Why an item cannot be offered for this film, or null. Separate from search so it is testable.
+export function unfitReason(info, { type, needsText, prompt, stats = {} }) {
+  if (!info.ok) return 'could not inspect';
+  if (type && info.kind && info.kind !== type) return `is a ${info.kind}, not a ${type}`; // a component cannot mount as a scene
+  if (info.imageVars.length) return 'needs images or video'; // would show demo photos
+  if (needsText && !info.textVars.length) return 'copy is hard-coded';
+  if (info.needsGpu && !config.registryGpuItems) return 'needs a GPU (three.js/WebGL)';
+  // Its own pictures show in every film; offer it only when the request is about what they show.
+  const pictured = (info.tags ?? []).some((t) => /^(photo|footage|leaves|cinemagraph)$/i.test(t));
+  const subjects = (info.tags ?? []).filter((t) => t.length > 3 && !GENERIC_TAG.test(t));
+  if ((info.bakedMedia?.length || pictured) && !subjects.some((t) => new RegExp(`\\b${t.replace(/[^a-z0-9]/gi, '.?')}`, 'i').test(prompt))) {
+    return 'shows its own demo pictures';
+  }
+  if (retired(stats[info.name])) return `failed in ${stats[info.name].failed} past builds`;
+  return null;
+}
+
+// Several searches per beat (the intent, the film's kind, what the copy is) merged by rank: one
+// 2-5 word query misses items that describe themselves in other words.
+export function beatQueries(beat, brief) {
+  const intent = beat.intent || beat.copy.join(' ');
+  const copy = beat.copy.join(' ');
+  const what = /\d/.test(copy) ? 'animated numbers chart'
+    : !copy.trim() ? ''
+      : copy.split(/\s+/).length <= 3 ? 'title wordmark reveal' : 'headline text reveal';
+  return [...new Set([intent, brief.kind && brief.kind !== 'other' ? `${brief.kind} ${intent}` : '', what].map((q) => q.trim()).filter(Boolean))];
+}
+
+async function shortlistFor(ws, queries, { needsText, type, prompt, background = false, max = 6, stats = {} }) {
+  const rank = new Map();
+  // The beat's own intent leads; the other phrasings add what it missed.
+  for (const [qi, q] of [].concat(queries).entries()) {
+    const found = await catalogSearch(ws, { query: q, type, limit: 12 });
+    for (const [i, item] of found.items.entries()) {
+      const r = rank.get(item.name) ?? { item, score: 0 };
+      r.score += (qi ? 0.4 : 1) / (i + 3);
+      rank.set(item.name, r);
+    }
+  }
+  // Search relevance first, then what worked in past builds.
+  const ranked = [...rank.values()]
+    .map((r) => ({ ...r, score: r.score + 0.02 * Math.max(-5, Math.min(5, standing(stats[r.item.name]))) }))
+    .sort((a, b) => b.score - a.score)
+    .map((r) => r.item);
   const out = [];
-  for (const item of found.items) {
+  for (const item of ranked) {
     if (blockedForPrompt(item.name, prompt)) continue; // someone else's product UI, not asked for
     if (background && !BACKGROUND_KIND.test(`${item.name} ${item.tags.join(' ')} ${item.description}`)) continue;
     const info = await inspectItem(ws, item.name);
-    if (!info.ok) continue;
-    if (info.imageVars.length) continue; // would show demo photos
-    if (needsText && !info.textVars.length) continue; // copy is hard-coded
-    out.push({ name: item.name, type: item.type, description: item.description, tags: item.tags, ...info });
+    if (unfitReason(info, { type, needsText, prompt, stats })) continue;
+    out.push({ name: item.name, type: item.type, description: item.description, ...info, tags: item.tags });
     if (out.length >= max) break;
   }
   return out;
@@ -296,24 +340,25 @@ async function shortlistFor(ws, query, { needsText, type, prompt, background = f
 export async function shortlist(ws, brief, prompt) {
   const lists = {};
   const components = {};
+  const stats = readStats();
   for (const b of brief.beats) {
-    const query = b.intent || b.copy.join(' ');
+    const queries = beatQueries(b, brief);
     const hasCopy = b.copy.some((c) => c.trim());
-    lists[b.id] = await shortlistFor(ws, query, { needsText: hasCopy, type: 'block', prompt });
+    lists[b.id] = await shortlistFor(ws, queries, { needsText: hasCopy, type: 'block', prompt, stats });
     // Components (text effects, captions, props) merge into a hand-built scene and take the scene's own copy.
-    if (hasCopy) components[b.id] = await shortlistFor(ws, query, { needsText: false, type: 'component', prompt, max: 3 });
+    components[b.id] = await shortlistFor(ws, queries, { needsText: false, type: 'component', prompt, max: 5, stats });
   }
   for (const o of brief.overlays ?? []) {
     const query = o.intent || `${o.position ?? ''} text overlay`;
-    lists[o.id] = await shortlistFor(ws, query, { needsText: true, type: 'block', prompt, max: 3 });
-    components[o.id] = await shortlistFor(ws, query, { needsText: false, type: 'component', prompt, max: 3 });
+    lists[o.id] = await shortlistFor(ws, query, { needsText: true, type: 'block', prompt, max: 3, stats });
+    components[o.id] = await shortlistFor(ws, query, { needsText: false, type: 'component', prompt, max: 3, stats });
   }
   for (const tr of (brief.transitions ?? []).filter((x) => x.kind === 'cover')) {
-    const found = await shortlistFor(ws, `${tr.style} transition`, { needsText: false, type: 'block', prompt, max: 6 });
+    const found = await shortlistFor(ws, `${tr.style} transition`, { needsText: false, type: 'block', prompt, max: 6, stats });
     lists[tr.id] = found.filter((i) => /overlay transition|covers? the frame|backstop/i.test(i.description) && !/showcase|shader transition/i.test(i.description)).slice(0, 3);
   }
   if (brief.background?.wanted) {
-    lists.background = await shortlistFor(ws, `${brief.background.description || ''} background`.trim(), { needsText: false, type: 'block', prompt, background: true });
+    lists.background = await shortlistFor(ws, `${brief.background.description || ''} background`.trim(), { needsText: false, type: 'block', prompt, background: true, stats });
   }
   return { blocks: lists, components };
 }
@@ -346,8 +391,10 @@ Rules:
 - Each brief transition of kind "cover" is ONE scene with layer "transition", same id, start = at - duration/2 written as the computed number (2.7, never "3 - 0.6/2"), that duration, no text: it covers the whole frame at its midpoint (hiding the cut) in theme colours and uncovers into the next beat. Use a block from its shortlist only if one fits, else hand-build (build says the shapes, colours and direction).
 - For a "handoff" transition there is no scene: the outgoing beat's motion ends with the exit and the next beat's motion starts with the matching entrance (e.g. whip: smear out 0.2 s / land blurred and sharpen 0.13 s). Say this in both scenes' motion.
 - vars holds only variable ids that the chosen block or components list. A hand-built scene with no components has empty vars: its layout, sizes and fonts go in build.
-- For each scene pick a block from that beat's shortlist BY ITS DESCRIPTION: what it shows must match the beat's intent AND the brief's look.mood (no 3D spectacle for a calm editorial piece, no diagram plates for a wordmark, no chat UI for a headline). If nothing fits, use null and hand-build.
-- A hand-built scene may use components from that beat's component shortlist (list them in components); the scene supplies the copy.
+- Build from the registry wherever it fits: every scene uses a block from its beat's shortlist, or is hand-built WITH at least one component from that beat's component shortlist. Pick BY DESCRIPTION: what it shows must match the beat's intent AND the brief's look.mood (no 3D spectacle for a calm editorial piece, no diagram plates for a wordmark, no chat UI for a headline).
+- A scene with no block and no component is the exception: add "<scene id>: no registry item fits because …" to decisions, naming why each shortlisted item does not fit.
+- A hand-built scene lists its components in components; the scene supplies the copy.
+- A data block (variables like series, periods, data, values, labels) shows its demo numbers unless you set those variables to the beat's own figures.
 - Never name a block or component outside the shortlists.
 - motion and build describe what the chosen block actually does (from its description) and how you tune it: set its behaviour controls in vars. Do not invent effects the block does not have.
 - If a block animates with its bundled font, keep that font for that scene and say so in decisions; the theme font applies to hand-built scenes.
@@ -388,6 +435,9 @@ function shortlistText({ blocks, components }) {
   }).join('\n\n');
 }
 
+const DATA_VAR = /^(series|periods|data|values|items|rows|points|labels|dataset)$/i;
+const isEmptyData = (v) => v == null || /^\s*(\[\s*\]|\{\s*\}|)\s*$/.test(typeof v === 'string' ? v : JSON.stringify(v));
+
 const allItems = (sl) => [...Object.values(sl.blocks ?? {}), ...Object.values(sl.components ?? {})].flat();
 
 // Checks only the shortlist can answer: real variable ids, a background block for the background
@@ -410,6 +460,24 @@ export function planChecks(plan, brief, sl) {
     for (const i of used) {
       for (const k of i.colorVars) {
         if (/transparent/i.test(String(s.vars?.[k] ?? '')) && !/background|ground|bg|backdrop/i.test(k)) errs.push(s.id + ': ' + k + ' is a colour, not a ground; give it a theme colour');
+      }
+    }
+    // A block must come from its own beat's shortlist (a component named as a block cannot mount).
+    if (s.block && s.layer !== 'background' && sl.blocks[s.id] && !sl.blocks[s.id].some((x) => x.name === s.block)) {
+      errs.push(s.id + ': ' + s.block + ' is not in this beat\'s block shortlist; pick one from it, or hand-build and list components');
+    }
+    // Registry first: a scene whose shortlists had candidates uses one, or says why not.
+    const offered = [...(sl.blocks[s.id] ?? []), ...(sl.components[s.id] ?? [])];
+    if (['main', 'overlay'].includes(s.layer ?? 'main') && !s.block && !(s.components ?? []).length && offered.length
+      && !(plan.decisions ?? []).some((d) => String(d).includes(s.id))) {
+      errs.push(s.id + ': uses no registry item though its shortlist has ' + offered.map((i) => i.name).join(', ') + '; use one, or add "' + s.id + ': no registry item fits because …" to decisions');
+    }
+    // A data block left without the beat's figures renders its demo data.
+    for (const i of used) {
+      const dataVars = [...i.textVars, ...i.otherVars].filter((k) => DATA_VAR.test(k));
+      const hasFigures = (s.text ?? []).some((t) => /\d/.test(t));
+      if (dataVars.length && hasFigures && dataVars.every((k) => isEmptyData(s.vars?.[k]))) {
+        errs.push(s.id + ': ' + i.name + ' shows its demo data unless ' + dataVars.join(', ') + ' hold the beat\'s figures');
       }
     }
     if (s.layer === 'background' && s.block && !(sl.blocks.background ?? []).some((x) => x.name === s.block)) {

@@ -15,6 +15,7 @@ import { runCheck } from '../tools/project-tools.js';
 import { layerEvidence, renderFinal, verifyOutput } from '../orchestrator.js';
 import { assemble, indexHtml } from './assemble.js';
 import { findingsFor, sceneFile, staticProblems, writeFallback, writeScene } from './scenes.js';
+import { recordOutcomes } from '../tools/registry-stats.js';
 
 const MAX_REPAIRS = 2;
 const FILM_REPAIRS = 2;
@@ -215,6 +216,14 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
     const r = await renderFinal(ws, (t, d) => emit(t, d));
     report.render = r.ok ? await verifyOutput(ws, plan) : { ok: false, log: r.log };
   }
+
+  // Teach the shortlist: each mounted item was kept, escalated to a written scene, or broke the render.
+  const renderLog = report.render && !report.render.ok ? String(report.render.log ?? '') : '';
+  recordOutcomes(scenes.filter((s) => s.escalatedFrom || (s.mode !== 'write' && s.item)).map((s) => {
+    const name = s.escalatedFrom ?? s.item;
+    const brokeRender = renderLog && new RegExp(`\\b${name}\\b`).test(renderLog);
+    return { name, ok: !s.escalatedFrom && !brokeRender, why: s.escalationReason ?? (brokeRender ? 'render failed on it' : null) };
+  }));
 
   report.usage = { input: usage.input, output: usage.output, calls: usage.calls, minutes: +((Date.now() - t0) / 60000).toFixed(1) };
   ws.writeJson('build-report.json', report);

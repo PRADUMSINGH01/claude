@@ -122,6 +122,11 @@ export async function inspectItem(ws, name) {
     controls: vars.filter((v) => !['string', 'image', 'video', 'color'].includes(v.type)).map((v) => ({ id: v.id, type: v.type, default: v.default, options: v.options ?? v.enum ?? null })),
     // Fonts the item ships: it animates with these, so a theme font may not apply to it.
     fonts: [...new Set((m.files ?? []).map((f) => f.path ?? f).filter((p) => /\.(woff2?|ttf|otf)$/i.test(p)).map((p) => p.split('/').pop().replace(/[-_](wght|slnt|latin|regular|variable|vf).*$/i, '').replace(/\.(woff2?|ttf|otf)$/i, '')))],
+    tags: m.tags ?? [],
+    // Pictures the item ships and shows whatever the film is (leaves, a coffee cup): its demo look.
+    bakedMedia: (m.files ?? []).map((f) => f.path ?? f).filter((p) => /\.(webp|png|jpe?g|gif|avif|mp4|webm|mov|glb|gltf)$/i.test(p)),
+    // three.js / WebGL scenes: software rendering (no GPU) stalls on them.
+    needsGpu: (m.tags ?? []).some((t) => /^(three-js|webgl|3d-object)$/i.test(t)),
     description: m.description ?? '',
   };
   cache[name] = info;

@@ -51,7 +51,8 @@ const planFor = (brief) => ({
     'BANNED:  glow, particles, fade-and-slide-up on every element',
     'QA:      t=2.5 headline whole; t=5.5 wordmark whole',
   ].join('\n'),
-  decisions: [],
+  // Hand-built on purpose: the test drives the scene writer, so each scene says why it skips the registry.
+  decisions: brief.beats.map((b) => `${b.id}: no registry item fits because this test hand-builds every scene`),
 });
 
 const FERRY = 'A 20 second launch film for Ferry, an app that books ferry tickets. On screen: "Ferry" and "Book the boat, not the queue".';

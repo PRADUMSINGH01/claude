@@ -69,6 +69,8 @@ const builder = str('BUILDER', base);
 export const config = {
   skillsDir: path.resolve(repoRoot, str('SKILLS_DIR', '.agents/skills')),
   registryRawUrl: str('REGISTRY_RAW_URL', 'https://raw.githubusercontent.com/heygen-com/hyperframes/main/registry'),
+  // three.js/WebGL registry items render only with a GPU; headless software rendering stalls on them.
+  registryGpuItems: bool('REGISTRY_GPU_ITEMS', false),
   jobsDir: path.resolve(repoRoot, str('JOBS_DIR', 'jobs')),
   hyperframesBin: str('HYPERFRAMES_BIN', path.join(harnessRoot, 'node_modules', '.bin', process.platform === 'win32' ? 'hyperframes.cmd' : 'hyperframes')),
   shimsDir: path.join(harnessRoot, 'shims'),

@@ -236,6 +236,14 @@ await step('story step: only for unscripted films over 15 s; figures on screen c
   assert.match(md, /## 1\. A\n/);
 });
 
+await step('scene writer: a missing or misnamed timeline registration is fixed in code', async () => {
+  const { ensureRegistered, staticProblems } = await import('../src/build/scenes.js');
+  const draft = '<template><div id="root" data-composition-id="a"></div><script>\n const tl = gsap.timeline({ paused: true });\n</script></template>';
+  assert.deepEqual(staticProblems(ensureRegistered(draft, 'a'), 'a', 3), []);
+  assert.match(ensureRegistered(draft.replace('</script>', 'window.__timelines["root"] = tl;</script>'), 'a'), /__timelines\["a"\] = tl/);
+  assert.equal(ensureRegistered('<template><script>1</script></template>', 'a'), '<template><script>1</script></template>');
+});
+
 await step('access rules', () => {
   assert.equal(canRead('builder', 'hyperframes-cli', 'references/cloud.md'), false);
   assert.equal(canRead('planner', 'hyperframes', 'assets/frame-presets/coral/FRAME.md'), true);

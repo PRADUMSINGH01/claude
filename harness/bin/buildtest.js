@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // End-to-end build test with NO model calls: a fake OpenAI-compatible server plays the scene writer.
-// Its first reply for each scene breaks the contract (no registered timeline) so the repair path runs;
+// Its first reply for each scene breaks the contract (unseeded Math.random) so the repair path runs;
 // the second is valid. Usage: node bin/buildtest.js <plan-job-dir-to-copy> [--render]
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -31,7 +31,7 @@ const server = http.createServer((req, res) => {
     const copy = JSON.parse(/<scene>\n([\s\S]*?)\n<\/scene>/.exec(msgs[1].content)?.[1] ?? '{"scene":{"copy":[]}}').scene.copy ?? [];
     const n = (seen.get(id) ?? 0) + 1;
     seen.set(id, n);
-    const timeline = n === 1 ? '' : `window.__timelines["${id}"] = tl;`;
+    const timeline = `${n === 1 ? 'tl.set({}, { x: Math.random() });\n    ' : ''}window.__timelines["${id}"] = tl;`;
     const html = `<template>
   <style>#root { position: absolute; inset: 0; container-type: size; display: flex; align-items: center; justify-content: center; font-family: var(--font-display); color: var(--fg); } #root .${id}-t { font-size: 12cqmin; }</style>
   <div id="root" data-composition-id="${id}">

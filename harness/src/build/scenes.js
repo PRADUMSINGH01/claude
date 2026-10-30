@@ -111,12 +111,25 @@ export function staticProblems(html, id, duration) {
   return p;
 }
 
+// The line models most often drop (contract #3): register the scene's timeline under its id. When the
+// file builds one gsap timeline but never registers it, or registers it under another key, code adds
+// or corrects the line instead of spending a repair call on it.
+export function ensureRegistered(html, id) {
+  if (!html || html.includes(`__timelines["${id}"]`) || html.includes(`__timelines['${id}']`)) return html;
+  const wrongKey = /window\.__timelines\[(["'])[^"']*\1\]\s*=/;
+  if (wrongKey.test(html)) return html.replace(wrongKey, `window.__timelines["${id}"] =`);
+  const tl = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*gsap\.timeline\(/.exec(html)?.[1];
+  const end = html.lastIndexOf('</script>');
+  if (!tl || end < 0) return html;
+  return `${html.slice(0, end)}  window.__timelines["${id}"] = ${tl};\n  ${html.slice(end)}`;
+}
+
 export async function writeScene(scene, ctx, { problems = null, current = null } = {}) {
   const { system, user } = scenePacket(scene, ctx);
   const repair = problems ? `\n\n<problems>\n${problems.map((x) => `- ${x}`).join('\n')}\n</problems>\n\n<current-file>\n${current}\n</current-file>\n\nFix every problem and reply with the whole corrected file.` : '';
   const reply = await ctx.ask(system, user + repair, { label: `${problems ? 'repair' : 'write'} ${scene.id}` });
   const html = typeof reply?.html === 'string' ? reply.html.trim() : null;
-  return html;
+  return ensureRegistered(html, scene.id);
 }
 
 export function findingsFor(check, file) {

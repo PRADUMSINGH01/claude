@@ -2,6 +2,7 @@
 //   project · theme tokens + fonts · install blocks/components · decide how each scene is made ·
 //   index.html (hosts, timing, layers, z-order, variable values, transparent grounds).
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { initProject } from '../orchestrator.js';
 import { hf } from '../hf.js';
@@ -9,6 +10,22 @@ import { applyTheme, registryAdd } from '../tools/registry-tools.js';
 import { prepareFonts } from './fonts.js';
 import { themeRoles, tokenCss } from './tokens.js';
 import { fallbackScene } from './scene-files.js';
+
+// GSAP ships inside the project (the version the scaffold pins), so check, snapshot and render
+// never fetch it: no network at render time, and no CDN or proxy failure can blank a frame.
+const GSAP_CDN = 'https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js';
+const GSAP_LOCAL = 'assets/vendor/gsap.min.js';
+
+function vendorGsap(ws) {
+  try {
+    const file = createRequire(import.meta.url).resolve('gsap/dist/gsap.min.js');
+    fs.mkdirSync(path.join(ws.projectDir, 'assets', 'vendor'), { recursive: true });
+    fs.copyFileSync(file, path.join(ws.projectDir, GSAP_LOCAL));
+    return GSAP_LOCAL;
+  } catch {
+    return GSAP_CDN;
+  }
+}
 
 const TRACK = { background: 0, main: 1, overlay: 2, transition: 3 };
 const Z = { background: 0, main: 10, overlay: 20, transition: 30 };
@@ -195,10 +212,11 @@ export async function assemble(ws, plan, brief, { emit = () => {} } = {}) {
     fs.writeFileSync(path.join(ws.projectDir, s.file), fallbackScene(s, plan.format, roles));
   }
 
-  fs.writeFileSync(path.join(ws.projectDir, 'index.html'), indexHtml(plan, scenes, roles, fonts.css, themeJson.colors));
+  const gsap = vendorGsap(ws);
+  fs.writeFileSync(path.join(ws.projectDir, 'index.html'), indexHtml(plan, scenes, roles, fonts.css, themeJson.colors, gsap));
   ws.chownAgentDirs();
   emit('assemble', { step: 'index', scenes: scenes.map((s) => ({ id: s.id, mode: s.mode, item: s.item })) });
-  return { roles, fonts: fonts.report, items, scenes, warnings };
+  return { roles, fonts: fonts.report, items, scenes, warnings, gsap };
 }
 
 function host(s, format) {
@@ -219,7 +237,7 @@ function host(s, format) {
   ].filter(Boolean).join('\n');
 }
 
-export function indexHtml(plan, scenes, roles, fontCss, colors) {
+export function indexHtml(plan, scenes, roles, fontCss, colors, gsap = GSAP_CDN) {
   const { width, height, duration } = plan.format;
   const order = [...scenes].sort((a, b) => (Z[a.layer] ?? 10) - (Z[b.layer] ?? 10) || a.start - b.start);
   return `<!doctype html>
@@ -227,7 +245,7 @@ export function indexHtml(plan, scenes, roles, fontCss, colors) {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=${width}, height=${height}" />
-    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script src="${gsap}"></script>
     <style>
 ${fontCss ? `${fontCss.split('\n').map((l) => `      ${l}`).join('\n')}\n` : ''}${tokenCss(roles, colors).split('\n').map((l) => `      ${l}`).join('\n')}
       * { margin: 0; padding: 0; box-sizing: border-box; }

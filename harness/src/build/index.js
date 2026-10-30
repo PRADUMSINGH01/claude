@@ -73,7 +73,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
 
   const fontCss = fs.readFileSync(path.join(ws.projectDir, 'index.html'), 'utf8').match(/@font-face[^}]*}/g)?.join('\n') ?? '';
   const themeColors = JSON.parse(fs.readFileSync(path.join(ws.projectDir, 'theme.json'), 'utf8')).colors ?? {};
-  const rewriteIndex = () => fs.writeFileSync(path.join(ws.projectDir, 'index.html'), indexHtml(plan, scenes, asm.roles, fontCss, themeColors));
+  const rewriteIndex = () => fs.writeFileSync(path.join(ws.projectDir, 'index.html'), indexHtml(plan, scenes, asm.roles, fontCss, themeColors, asm.gsap));
 
   // 2–3. Write and verify the scenes the model has to write.
   const writeAndVerify = async (targets) => {

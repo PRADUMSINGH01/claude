@@ -102,6 +102,9 @@ async function scratchManifest(ws, name) {
   return { type: res.json.type, duration: Number(/data-duration="([\d.]+)"/.exec(src)?.[1] ?? 0) || null, variables };
 }
 
+// Options come as plain values or as { value, label }; the plan sets values.
+const optionValues = (opts) => (Array.isArray(opts) ? opts.map((o) => (o && typeof o === 'object' ? o.value : o)) : null);
+
 export async function inspectItem(ws, name) {
   const cachePath = ws.meta('inspect-cache.json');
   const cache = fs.existsSync(cachePath) ? JSON.parse(fs.readFileSync(cachePath, 'utf8')) : {};
@@ -119,7 +122,7 @@ export async function inspectItem(ws, name) {
     colorVars: vars.filter((v) => v.type === 'color').map((v) => v.id),
     otherVars: vars.filter((v) => !['string', 'image', 'video', 'color'].includes(v.type)).map((v) => v.id),
     // Behaviour controls with their defaults, so a plan can set them instead of inventing motion.
-    controls: vars.filter((v) => !['string', 'image', 'video', 'color'].includes(v.type)).map((v) => ({ id: v.id, type: v.type, default: v.default, options: v.options ?? v.enum ?? null })),
+    controls: vars.filter((v) => !['string', 'image', 'video', 'color'].includes(v.type)).map((v) => ({ id: v.id, type: v.type, default: v.default, options: optionValues(v.options ?? v.enum) })),
     // Fonts the item ships: it animates with these, so a theme font may not apply to it.
     fonts: [...new Set((m.files ?? []).map((f) => f.path ?? f).filter((p) => /\.(woff2?|ttf|otf)$/i.test(p)).map((p) => p.split('/').pop().replace(/[-_](wght|slnt|latin|regular|variable|vf).*$/i, '').replace(/\.(woff2?|ttf|otf)$/i, '')))],
     tags: m.tags ?? [],

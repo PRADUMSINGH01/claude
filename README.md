@@ -17,7 +17,11 @@ seeking a paused GSAP timeline frame by frame), plus the HTTP API the web fronte
 
 ## Pipelines
 
-**`motion run` / the API — `harness/src/orchestrator.js`** (resumable stages in `jobs/<id>/harness/state.json`)
+**The API server** uses `runFilm` (`harness/src/film.js`): plan + build below as one resumable job,
+with the app's aspect, length and theme passed into planning. A retried job resumes with the
+pipeline it started with; `PIPELINE=agents` switches new jobs back to the agent loops.
+
+**`motion run` — `harness/src/orchestrator.js`** (the agent loops) (resumable stages in `jobs/<id>/harness/state.json`)
 
 1. `init` — `hyperframes init` (code).
 2. `planned` — **planner** agent → `SPEC.md`, `plan.json`, theme (registry blocks + one theme).
@@ -52,6 +56,7 @@ files wrap everything in `<template>` and style `#root`; asset paths are `assets
 cp .env.example .env    # set PROVIDER and that provider's key
 cd harness && npm ci
 npm run selftest -- --quick          # no model calls, no CLI
+node bin/filmtest.js                 # runFilm end to end against a fake model (--no-render offline)
 npm run motion -- providers
 npm run motion -- run "A 20 second launch film for ..." --theme coral
 ```

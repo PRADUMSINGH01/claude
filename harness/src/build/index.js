@@ -25,7 +25,7 @@ async function inBatches(list, n, fn) {
   return out;
 }
 
-export async function runBuild(dir, { onEvent = () => {}, look = false, render = true, maxTokens = Number(process.env.BUILD_MAX_TOKENS ?? 150_000) } = {}) {
+export async function runBuild(dir, { onEvent = () => {}, look = false, render = true, maxTokens = Number(process.env.BUILD_MAX_TOKENS ?? 150_000), signal } = {}) {
   const ws = Workspace.open(dir);
   const plan = ws.readJson('plan.json');
   const brief = ws.readJson('brief.json');
@@ -43,19 +43,26 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
       emit('cap', { label, used: usage.input + usage.output, maxTokens });
       return null;
     }
-    const before = usage.input + usage.output;
-    const out = await askJson(provider, system, user, usage).catch((err) => {
+    const [inBefore, outBefore] = [usage.input, usage.output];
+    const out = await askJson(provider, system, user, usage, { signal }).catch((err) => {
+      if (signal?.aborted) throw err;
       emit('error', { label, error: err.message });
       return null;
     });
-    emit('call', { label, tokens: usage.input + usage.output - before });
+    const [input, output] = [usage.input - inBefore, usage.output - outBefore];
+    emit('call', { label, tokens: input + output, input, output });
     return out;
   };
 
   await ensureBrowser();
+  ws.setState({ stage: 'building' });
+  const step = (name) => {
+    signal?.throwIfAborted();
+    emit('step', { step: name });
+  };
 
   // 1. Assemble
-  emit('step', { step: 'assemble' });
+  step('assemble');
   const asm = await assemble(ws, plan, brief, { emit: (_t, d) => emit('assemble', d) });
   report.warnings.push(...asm.warnings);
   const ctx = { format: plan.format, roles: asm.roles, lib, items: asm.items, ask, hasBackground: plan.scenes.some((s) => s.layer === 'background') };
@@ -106,12 +113,12 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
     }
   };
 
-  emit('step', { step: 'write scenes' });
+  step('write scenes');
   await writeAndVerify(scenes.filter((s) => s.mode === 'write'));
 
   // 4. Verify the film: check + measured. Readability problems count even when check calls them warnings.
   //    A written scene with issues gets one repair; a mounted/block scene is escalated to the writer once.
-  emit('step', { step: 'verify film' });
+  step('verify film');
   const issues = await measure(ws, plan, scenes);
   const check = await runCheck(ws);
   const MUST_FIX = /^\[error\]|text_below_floor|contrast|offscreen|clipped|overflow|cut_off/;
@@ -156,7 +163,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
 
   // 5. Look (optional): one vision call over the contact sheet; write-mode scenes get one repair.
   if (look) {
-    emit('step', { step: 'look' });
+    step('look');
     report.look = await lookAtFilm(ws, plan, scenes, provider, usage, maxTokens, emit);
     const toFix = (report.look?.issues ?? []).map((i) => ({ i, s: scenes.find((x) => x.id === i.scene && x.mode === 'write') })).filter((x) => x.s);
     const before = new Map();
@@ -182,7 +189,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
 
   // 6. Render + verify.
   if (render) {
-    emit('step', { step: 'render' });
+    step('render');
     const r = await renderFinal(ws, (t, d) => emit(t, d));
     report.render = r.ok ? await verifyOutput(ws, plan) : { ok: false, log: r.log };
   }

@@ -393,11 +393,12 @@ ${JSON.stringify(rows, null, 1)}`, usage);
 
 // ---- Pipeline ----------------------------------------------------------------------
 
-export async function ask(provider, system, user, usage) {
+export async function ask(provider, system, user, usage, { signal } = {}) {
   const messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
   let max = config.maxOutputTokens;
   for (let attempt = 0; ; attempt++) {
-    const { message, finish, usage: u } = await chat(provider, messages, null, { maxOutputTokens: max });
+    signal?.throwIfAborted();
+    const { message, finish, usage: u } = await chat(provider, messages, null, { maxOutputTokens: max, signal });
     usage.input += u.input;
     usage.output += u.output;
     usage.calls += 1;
@@ -427,21 +428,45 @@ export function parseModelJson(text) {
   }
 }
 
-export async function runPlan({ prompt, onEvent = () => {}, jobsDir } = {}) {
+// Settings picked in the app (aspect, length, theme) arrive as options, not prompt text.
+const ASPECT = { '16:9': [1920, 1080], '9:16': [1080, 1920], '1:1': [1080, 1080] };
+
+function settingsText(options = {}) {
+  const lines = [];
+  if (ASPECT[options.aspect]) lines.push(`- Aspect ${options.aspect}: ${ASPECT[options.aspect].join('x')}.`);
+  if (options.duration) lines.push(`- Duration: ${options.duration} s, unless the request itself gives a length.`);
+  if (options.theme && listThemes().some((t) => t.name === options.theme)) lines.push(`- Theme preset: ${options.theme} (set look.preset).`);
+  return lines.length ? `\n\nSettings chosen in the app:\n${lines.join('\n')}` : '';
+}
+
+export function checkSettings(brief, options = {}) {
+  const want = ASPECT[options.aspect];
+  if (want && (brief.format?.width !== want[0] || brief.format?.height !== want[1])) return [`format must be ${want.join('x')} (aspect ${options.aspect} was chosen in the app)`];
+  return [];
+}
+
+// dir: re-plan inside an existing job folder (a resumed job) instead of creating one.
+// judge: false skips the rating call (it only scores the plan; the build does not need it).
+export async function runPlan({ prompt, options = {}, onEvent = () => {}, jobsDir, dir, judge: withJudge = true, signal, mode = 'plan-only' } = {}) {
   const provider = providerForRole('planner');
-  const ws = Workspace.create(jobsDir);
+  const ws = dir ? Workspace.open(dir) : Workspace.create(jobsDir);
   const lib = new SkillLibrary(config.skillsDir);
   const usage = { input: 0, output: 0, calls: 0 };
-  ws.writeJson('request.json', { prompt, createdAt: new Date().toISOString(), mode: 'plan-only' });
+  const prior = ws.readJson('request.json', {});
+  ws.writeJson('request.json', { ...prior, prompt, options, createdAt: prior.createdAt ?? new Date().toISOString(), mode });
+  onEvent({ type: 'job_start', job: ws.id, dir: ws.dir, resume: Boolean(dir) });
+  const askP = (system, user) => ask(provider, system, user, usage, { signal });
+  const request = `${prompt}${settingsText(options)}`;
+  const briefProblems = (b) => (Array.isArray(b?.beats) ? [...checkBrief(b, prompt), ...checkSettings(b, options)] : ['reply was not a brief object with beats[] (cut off or invalid JSON)']);
 
   // 1. Understand
   onEvent({ type: 'step', step: 'understand', provider: `${provider.name}/${provider.model}` });
-  let brief = await ask(provider, UNDERSTAND_SYSTEM, prompt, usage);
-  let briefErrs = (Array.isArray(brief?.beats) ? checkBrief(brief, prompt) : ['reply was not a brief object with beats[] (cut off or invalid JSON)']);
+  let brief = await askP(UNDERSTAND_SYSTEM, request);
+  let briefErrs = briefProblems(brief);
   if (briefErrs.length) {
     onEvent({ type: 'repair', step: 'understand', errors: briefErrs });
-    brief = await ask(provider, UNDERSTAND_SYSTEM, `${prompt}\n\nYour previous brief had these problems; fix them:\n- ${briefErrs.join('\n- ')}\n\nPrevious brief:\n${JSON.stringify(brief)}`, usage);
-    briefErrs = (Array.isArray(brief?.beats) ? checkBrief(brief, prompt) : ['reply was not a brief object with beats[] (cut off or invalid JSON)']);
+    brief = await askP(UNDERSTAND_SYSTEM, `${request}\n\nYour previous brief had these problems; fix them:\n- ${briefErrs.join('\n- ')}\n\nPrevious brief:\n${JSON.stringify(brief)}`);
+    briefErrs = briefProblems(brief);
   }
   if (!Array.isArray(brief?.beats)) {
     ws.writeJson('brief.raw.json', { raw: usage.lastRaw ?? null });
@@ -466,11 +491,11 @@ export async function runPlan({ prompt, onEvent = () => {}, jobsDir } = {}) {
     const errs = [await plannerHandoff.validate(p, ctx), ...planChecks(p, brief, lists)].filter(Boolean);
     return errs.length ? errs.join('\n') : null;
   };
-  let plan = await ask(provider, system, input, usage);
+  let plan = await askP(system, input);
   let problems = await validate(plan);
   if (problems) {
     onEvent({ type: 'repair', step: 'plan', errors: problems.split('\n') });
-    plan = await ask(provider, system, `${input}\n\nYour previous plan had these problems; fix them and reply with the whole plan:\n${problems}\n\nPrevious plan:\n${JSON.stringify(plan)}`, usage);
+    plan = await askP(system, `${input}\n\nYour previous plan had these problems; fix them and reply with the whole plan:\n${problems}\n\nPrevious plan:\n${JSON.stringify(plan)}`, usage);
     problems = await validate(plan);
   }
   if (!Array.isArray(plan?.scenes)) {
@@ -480,8 +505,8 @@ export async function runPlan({ prompt, onEvent = () => {}, jobsDir } = {}) {
   ws.writeJson('plan.json', plan);
 
   // 4. Rate (code)
-  onEvent({ type: 'step', step: 'judge' });
-  const judge = await judgePlan(provider, plan, brief, lists, usage, prompt).catch(() => null);
+  if (withJudge) onEvent({ type: 'step', step: 'judge' });
+  const judge = withJudge ? await judgePlan(provider, plan, brief, lists, usage, prompt).catch(() => null) : null;
   ws.writeJson('judge.json', judge);
   const rating = ratePlan(plan, brief, problems, { lists, judge });
   ws.writeJson('rating.json', rating);

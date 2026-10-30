@@ -11,6 +11,7 @@ import { OAuth2Client } from 'google-auth-library';
 
 // Import harness modules (read-only consumption; no harness files are modified)
 import { runJob } from '../harness/src/orchestrator.js';
+import { runFilm } from '../harness/src/film.js';
 import {
   config,
   providerStatus,
@@ -20,6 +21,10 @@ import {
 import { listThemes } from '../harness/src/tools/registry-tools.js';
 
 const JOBS_DIR = config.jobsDir;
+// plan-build (default): plan in a few short calls, then code assembles and the model writes only
+// hand-built scenes (~20-60k tokens a film). agents: the older planner/builder/critic/fixer tool
+// loops (runJob), roughly 1-2M tokens a film.
+const PIPELINE = process.env.PIPELINE === 'agents' ? 'agents' : 'plan-build';
 const SKILLS_DIR = config.skillsDir;
 
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -322,6 +327,7 @@ function mapHarnessStageToFrontend(harnessStage) {
     case 'installed':
       return 'audio';
     case 'built':
+    case 'building':
       return 'building';
     case 'reviewed':
       return 'reviewing';
@@ -379,7 +385,7 @@ function syncDiskJobs() {
     let status = 'failed';
     if (hasVideo || result?.verify?.ok || state?.stage === 'done') {
       status = hasVideo ? 'done' : 'failed';
-    } else if (state?.stage === 'planned-only') {
+    } else if (state?.stage === 'planned-only' && request?.mode !== 'plan-build') {
       status = 'done';
     }
 
@@ -515,6 +521,24 @@ function formatLogLine(ev) {
       return `Render started (${ev.quality || 'looks'} quality)`;
     case 'render_done':
       return `Render ${ev.ok ? 'finished' : 'FAILED'}`;
+    case 'step':
+      return `Step -> ${ev.step}${ev.provider ? ` (${ev.provider})` : ''}`;
+    case 'repair':
+      return `Repair ${ev.step}: ${(ev.errors || []).join(' | ').slice(0, 300)}`;
+    case 'plan':
+      return `Plan ready: ${ev.plan?.scenes?.length || 0} scenes, ${ev.usage?.calls || 0} calls`;
+    case 'plan_warnings':
+      return `Plan warnings: ${(ev.problems || []).join(' | ').slice(0, 300)}`;
+    case 'call':
+      return `model: ${ev.label} (+${ev.input || 0} in / +${ev.output || 0} out tokens)`;
+    case 'scene':
+      return `scene ${ev.id}: ${ev.step}${ev.problems ? ` — ${[].concat(ev.problems).join(' | ').slice(0, 220)}` : ''}`;
+    case 'check':
+      return `check ${ev.round ?? ''}: ${ev.errors ?? 0} errors, ${ev.warnings ?? 0} warnings`;
+    case 'measured':
+      return (ev.issues || []).length ? `measured: ${ev.issues.map((i) => `${i.id}: ${i.problem}`).join(' | ').slice(0, 300)}` : 'measured checks pass';
+    case 'error':
+      return `${ev.label || 'error'}: ${ev.error || ''}`;
     case 'job_done':
       return `Job done in ${ev.duration || '?'}s`;
     case 'job_failed':
@@ -657,10 +681,36 @@ function createHarnessEventHandler(job) {
         break;
       }
 
+      // plan-build pipeline: the plan reports its usage once; each build call reports its own.
+      case 'step': {
+        const s = {
+          understand: ['designing', 'Reading the brief: copy, timing, look...'],
+          shortlist: ['planning', 'Shortlisting registry blocks for each beat...'],
+          plan: ['planning', 'Planning scenes, theme & SPEC...'],
+          assemble: ['building', 'Assembling project: theme, fonts, blocks, timeline...'],
+          'write scenes': ['building', 'Writing hand-built scenes...'],
+          'verify film': ['checking', 'Running HyperFrames checks & measured frame checks...'],
+          look: ['reviewing', 'Reviewing frames for visible defects...'],
+          render: ['rendering', 'Rendering final MP4...'],
+        }[ev.step];
+        if (s) [job.stage, job.activity] = s;
+        break;
+      }
+
+      case 'plan': {
+        if (ev.plan?.title) job.title = ev.plan.title;
+        const th = ev.plan?.theme;
+        if (th) job.theme = th.preset || th.name || job.theme;
+        job.activity = `Storyboard locked (${ev.plan?.scenes?.length || 0} scenes).`;
+      }
+      // falls through: count the plan's tokens
+      case 'call':
       case 'turn': {
-        if (ev.input || ev.output) {
-          liveTokens.input += Number(ev.input || 0);
-          liveTokens.output += Number(ev.output || 0);
+        const u = ev.type === 'plan' ? ev.usage || {} : ev;
+        if (ev.type === 'call') job.activity = `Model: ${ev.label}...`;
+        if (u.input || u.output) {
+          liveTokens.input += Number(u.input || 0);
+          liveTokens.output += Number(u.output || 0);
           job.tokens = {
             total: liveTokens.input + liveTokens.output,
             input: liveTokens.input,
@@ -753,7 +803,11 @@ async function drainQueue() {
     }
 
     const onEvent = createHarnessEventHandler(job);
-    const result = await runJob({
+    // A resumed job keeps the pipeline it started with.
+    const resumedMode = mode === 'resume' ? readJsonSafe(path.join(resumeDir, 'harness', 'request.json'))?.mode : null;
+    const usePlanBuild = mode === 'resume' ? resumedMode === 'plan-build' : PIPELINE === 'plan-build';
+    pushLog(job, `Pipeline: ${usePlanBuild ? 'plan + build' : 'agents'}`);
+    const result = await (usePlanBuild ? runFilm : runJob)({
       prompt: mode === 'resume' ? undefined : job.prompt,
       options: mode === 'resume' ? {} : options,
       resume: mode === 'resume' ? resumeDir : undefined,

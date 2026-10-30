@@ -528,6 +528,8 @@ function formatLogLine(ev) {
       return `Repair ${ev.step}: ${(ev.errors || []).join(' | ').slice(0, 300)}`;
     case 'plan':
       return `Plan ready: ${ev.plan?.scenes?.length || 0} scenes, ${ev.usage?.calls || 0} calls`;
+    case 'dedupe':
+      return `One copy of each line: ${(ev.moved || []).join('; ')}`;
     case 'palette':
       return `Palette from the ${ev.source}: ${Object.entries(ev.colors || {}).map(([k, v]) => `${k} ${v}`).join(', ')}`;
     case 'story':

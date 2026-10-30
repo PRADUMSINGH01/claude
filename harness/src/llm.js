@@ -84,7 +84,11 @@ export async function chat(provider, messages, tools, { signal, toolChoice, maxO
         console.error(`[llm] ${provider.name}/${provider.model} failed after ${took}s (attempt ${attempt + 1}): ${status || ''} ${String(err?.message ?? err).slice(0, 200)}`);
         throw err;
       }
-      const wait = Math.min(60_000, 2000 * 2 ** attempt) + Math.random() * 1000;
+      // A rate limit says how long to wait (Azure: retry-after / retry-after-ms); never retry sooner.
+      const h = err?.headers;
+      const get = (k) => (typeof h?.get === 'function' ? h.get(k) : h?.[k]);
+      const told = Number(get('retry-after-ms')) || Number(get('retry-after')) * 1000 || 0;
+      const wait = Math.max(told, Math.min(60_000, 2000 * 2 ** attempt)) + Math.random() * 1000;
       // Visible in the log: a timeout loop (slow model vs. REQUEST_TIMEOUT_SEC) shows up as repeated lines.
       console.error(`[llm] ${provider.name}/${provider.model} attempt ${attempt + 1} failed after ${took}s: ${status || ''} ${String(err?.message ?? err).slice(0, 160)} — retrying in ${(wait / 1000).toFixed(0)}s`);
       await new Promise((r) => setTimeout(r, wait));

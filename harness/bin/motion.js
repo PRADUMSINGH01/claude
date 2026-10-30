@@ -92,6 +92,7 @@ function printPlanEvent(ev) {
   switch (ev.type) {
     case 'step': return console.log(`\n■ ${ev.step}${ev.provider ? `  (${ev.provider})` : ''}`);
     case 'repair': return console.log(`  ↻ repair ${ev.step}: ${ev.errors.join(' | ').slice(0, 300)}`);
+    case 'dedupe': return console.log(`  one copy of each line: ${ev.moved.join('; ')}`);
     case 'palette': return console.log(`  colours from the ${ev.source}: ${Object.entries(ev.colors).map(([k, v]) => `${k} ${v}`).join(', ')}${ev.swatches ? `\n  swatches: ${ev.swatches.map((x) => `${x.hex} ${Math.round(x.weight * 100)}%`).join(', ')}` : ''}`);
     case 'story':
       if (ev.skipped) return console.log(`  story: skipped (${ev.skipped})`);

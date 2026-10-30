@@ -53,6 +53,29 @@ export const readFloor = (copy) => {
   return words ? Math.max(2, 1 + 0.3 * words) : 0;
 };
 
+// A line shown in two beats is shown once (story.md §7: the mark lands once, usually on the end card).
+// Code keeps one occurrence instead of spending a repair call: a short name (up to 3 words) keeps its
+// last appearance, a longer line its first. Returns the lines it moved, for the log.
+export function dedupeCopy(brief) {
+  const holders = [...(brief?.beats ?? []), ...(brief?.overlays ?? [])];
+  const norm = (x) => String(x).toLowerCase().replace(/\s+/g, ' ').trim();
+  const seen = new Map();
+  for (const h of holders) for (const c of h.copy ?? []) if (norm(c)) seen.set(norm(c), [...(seen.get(norm(c)) ?? []), h]);
+  const moved = [];
+  for (const [line, hs] of seen) {
+    const unique = [...new Set(hs)];
+    if (unique.length < 2) continue;
+    const short = line.split(' ').length <= 3;
+    const keep = short ? unique.at(-1) : unique[0];
+    for (const h of unique) if (h !== keep) h.copy = h.copy.filter((c) => norm(c) !== line);
+    moved.push(`"${line}" kept in ${keep.id} only`);
+  }
+  return moved;
+}
+
+// The request asks for something to stay on screen (a logo bug, a watermark, a persistent line).
+const ASKS_PERSISTENT = /\b(logo|watermark|bug|corner|throughout|persistent|the whole (film|video)|keep .{0,40}on screen|stays? on screen|stay visible)\b/i;
+
 export function checkBrief(brief, prompt, options = {}) {
   const errs = [];
   const holders = [...(brief.beats ?? []), ...(brief.overlays ?? [])];
@@ -81,6 +104,10 @@ export function checkBrief(brief, prompt, options = {}) {
     }
   }
   for (const o of brief.overlays ?? []) {
+    // spec.md BANNED: the logo docked in a corner. A short name held on screen is a docked mark.
+    const words = (o.copy ?? []).join(' ').trim().split(/\s+/).filter(Boolean);
+    const isMark = words.length > 0 && words.length <= 3 && (o.position === 'corner' || norm((o.copy ?? []).join(' ')) === norm(brief.title ?? ''));
+    if (isMark && !ASKS_PERSISTENT.test(prompt)) errs.push(`overlay ${o.id} docks "${o.copy.join(' ')}" on screen through the film, a banned default (the docked logo); remove the overlay and land the name once in a beat, usually the end card`);
     if (!(o.start >= 0 && o.end <= (brief.format?.duration ?? Infinity) + 0.051 && o.end > o.start)) errs.push(`overlay ${o.id} must sit inside 0–${brief.format?.duration}s`);
     for (const c of o.copy ?? []) if (INSTRUCTION_WORDS.test(c)) errs.push(`overlay ${o.id} copy "${c}" reads like an instruction, not on-screen text`);
     const floor = readFloor(o.copy ?? []);
@@ -623,16 +650,24 @@ export async function runPlan({ prompt, options = {}, onEvent = () => {}, jobsDi
     if (look && b && typeof b === 'object') b.look = { ...(b.look ?? {}), preset: null, colors: { ...look.colors }, ...(look.mood ? { mood: look.mood } : {}) };
     return b;
   };
+  // Every brief the model writes: one copy of each line, then the chosen colours.
+  const prep = (b) => {
+    if (Array.isArray(b?.beats)) {
+      const moved = dedupeCopy(b);
+      if (moved.length) onEvent({ type: 'dedupe', moved });
+    }
+    return withLook(b);
+  };
   const request = `${prompt}${settingsText(options, look)}`;
   const briefProblems = (b) => (Array.isArray(b?.beats) ? [...checkBrief(b, prompt, options), ...checkSettings(b, options)] : ['reply was not a brief object with beats[] (cut off or invalid JSON)']);
 
   // 1. Understand
   onEvent({ type: 'step', step: 'understand', provider: `${provider.name}/${provider.model}` });
-  let brief = withLook(await askP(UNDERSTAND_SYSTEM, request));
+  let brief = prep(await askP(UNDERSTAND_SYSTEM, request));
   let briefErrs = briefProblems(brief);
   if (briefErrs.length) {
     onEvent({ type: 'repair', step: 'understand', errors: briefErrs });
-    brief = withLook(await askP(UNDERSTAND_SYSTEM, `${request}\n\nYour previous brief had these problems; fix them:\n- ${briefErrs.join('\n- ')}\n\nPrevious brief:\n${JSON.stringify(brief)}`));
+    brief = prep(await askP(UNDERSTAND_SYSTEM, `${request}\n\nYour previous brief had these problems; fix them:\n- ${briefErrs.join('\n- ')}\n\nPrevious brief:\n${JSON.stringify(brief)}`));
     briefErrs = briefProblems(brief);
   }
   if (!Array.isArray(brief?.beats)) {
@@ -647,7 +682,7 @@ export async function runPlan({ prompt, options = {}, onEvent = () => {}, jobsDi
   const gate = storyApplies(brief, prompt);
   if (gate.applies) {
     onEvent({ type: 'step', step: 'story' });
-    const { story, errs } = await storyPass(askP, lib, brief, request, prompt, options, onEvent, withLook);
+    const { story, errs } = await storyPass(askP, lib, brief, request, prompt, options, onEvent, prep);
     if (!errs.length) {
       ws.writeJson('brief.original.json', brief);
       brief = story.brief;

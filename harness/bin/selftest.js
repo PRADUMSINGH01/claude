@@ -281,6 +281,21 @@ await step('look: named palettes read; a colour reference image gives ground, in
   assert.deepEqual(rolesFromSwatches(sw), { ground: '#1F3D2B', ink: '#F2E8D5', accent: '#E8762C', accent2: '#2BA6A0' });
 });
 
+await step('brief: a repeated line is kept once (names on the end card); a docked logo overlay is refused', async () => {
+  const { dedupeCopy, checkBrief } = await import('../src/plan.js');
+  const b = { title: 'Tidepool', format: { duration: 25 }, background: { wanted: false }, overlays: [], beats: [
+    { id: 'hook', start: 0, end: 5, copy: ['Tidepool', 'Know before you paddle out'] },
+    { id: 'mid', start: 5, end: 15, copy: ['Know before you paddle out'] },
+    { id: 'end', start: 15, end: 25, copy: ['Tidepool'] }] };
+  dedupeCopy(b);
+  assert.deepEqual(b.beats.map((x) => x.copy), [['Know before you paddle out'], [], ['Tidepool']]);
+  const P = 'A 25 second launch film for Tidepool. On screen: "Tidepool" and "Know before you paddle out".';
+  assert.deepEqual(checkBrief(b, P), []);
+  const docked = { ...b, overlays: [{ id: 'logo', start: 0, end: 25, copy: ['Tidepool'], position: 'corner' }] };
+  assert.match(checkBrief(docked, P).join(), /docked logo/);
+  assert.doesNotMatch(checkBrief(docked, `${P} Keep the logo in the corner.`).join(), /docked logo/);
+});
+
 await step('access rules', () => {
   assert.equal(canRead('builder', 'hyperframes-cli', 'references/cloud.md'), false);
   assert.equal(canRead('planner', 'hyperframes', 'assets/frame-presets/coral/FRAME.md'), true);

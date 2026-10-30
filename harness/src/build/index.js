@@ -17,7 +17,14 @@ import { assemble, indexHtml } from './assemble.js';
 import { findingsFor, sceneFile, staticProblems, writeFallback, writeScene } from './scenes.js';
 
 const MAX_REPAIRS = 2;
-const PARALLEL = 3;
+const FILM_REPAIRS = 2;
+// Scene calls in flight at once. Lower it for a deployment with a small tokens-per-minute quota
+// (Azure answers 429 when it is exceeded).
+const PARALLEL = Math.max(1, Number(process.env.BUILD_PARALLEL ?? 3) || 3);
+// Every layout and readability finding hyperframes check reports, whatever its severity
+// (lint/layout/craft codes in hyperframes 0.8): text off frame, overflowing its box, too small,
+// hidden, unpainted, overlapping, low contrast, or on screen too briefly to read.
+const MUST_FIX = /^\[error\]|frame_out_of_frame|text_box_overflow|text_below_floor|text_occluded|text_not_painted|content_overlap|contrast|line_unread|offscreen|clipped|overflow|cut_off/;
 
 async function inBatches(list, n, fn) {
   const out = [];
@@ -116,33 +123,25 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
   step('write scenes');
   await writeAndVerify(scenes.filter((s) => s.mode === 'write'));
 
-  // 4. Verify the film: check + measured. Readability problems count even when check calls them warnings.
-  //    A written scene with issues gets one repair; a mounted/block scene is escalated to the writer once.
+  // 4. Verify the film: check + measured. Readability problems count even when check calls them
+  //    warnings (review.md: text cut off, too small, hidden or unreadable is a P0). A mounted/block scene
+  //    with one is rewritten once; a written scene gets up to FILM_REPAIRS repairs, each re-checked, and
+  //    one still failing becomes the code fallback (sized to fit and read) rather than ship broken.
   step('verify film');
-  const issues = await measure(ws, plan, scenes);
-  const check = await runCheck(ws);
-  const MUST_FIX = /^\[error\]|text_below_floor|contrast|offscreen|clipped|overflow|cut_off/;
-  for (const s of scenes) {
-    const found = findingsFor(check, s.file).filter((f) => MUST_FIX.test(f));
-    if (found.length) issues.push({ id: s.id, problem: found.join('; ') });
-  }
+  const filmIssues = async (subset) => {
+    const found = await measure(ws, plan, subset);
+    const c = await runCheck(ws);
+    for (const s of subset) {
+      const bad = findingsFor(c, s.file).filter((f) => MUST_FIX.test(f));
+      if (bad.length) found.push({ id: s.id, problem: bad.join('; ') });
+    }
+    return { found: found.filter((i) => subset.some((s) => s.id === i.id)), check: c };
+  };
+  let { found: issues, check } = await filmIssues(scenes);
   const indexFindings = findingsFor(check, 'index.html').filter((f) => f.startsWith('[error]'));
   if (indexFindings.length) report.warnings.push(...indexFindings.map((f) => `index.html (assembler): ${f}`));
   report.measured = issues;
   emit('measured', { issues });
-
-  const writtenWithIssues = scenes.filter((s) => s.mode === 'write' && !String(report.scenes[s.id].result).startsWith('fallback') && issues.some((i) => i.id === s.id));
-  await inBatches(writtenWithIssues, PARALLEL, async (s) => {
-    const problems = issues.filter((i) => i.id === s.id).map((i) => i.problem);
-    emit('scene', { id: s.id, step: 'film repair', problems });
-    const html = await writeScene(s, ctx, { problems, current: fs.readFileSync(sceneFile(ws, s), 'utf8') });
-    report.scenes[s.id].attempts++;
-    if (html && !staticProblems(html, s.id, s.duration).length) fs.writeFileSync(sceneFile(ws, s), html);
-  });
-  if (writtenWithIssues.length) {
-    const c = await runCheck(ws);
-    for (const s of writtenWithIssues) if (findingsFor(c, s.file).some((f) => f.startsWith('[error]'))) { writeFallback(ws, s, ctx); report.scenes[s.id].result = 'fallback (film repair broke it)'; }
-  }
 
   const escalate = scenes.filter((s) => s.mode !== 'write' && s.layer !== 'background' && issues.some((i) => i.id === s.id));
   if (escalate.length) {
@@ -159,6 +158,29 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
     rewriteIndex();
     emit('escalate', { scenes: escalate.map((s) => ({ id: s.id, from: s.escalatedFrom, why: s.escalationReason })) });
     await writeAndVerify(escalate);
+    ({ found: issues } = await filmIssues(scenes));
+  }
+
+  const live = (s) => s.mode === 'write' && !String(report.scenes[s.id].result).startsWith('fallback');
+  for (let round = 1; round <= FILM_REPAIRS; round++) {
+    const failing = scenes.filter((s) => live(s) && issues.some((i) => i.id === s.id));
+    if (!failing.length) break;
+    await inBatches(failing, PARALLEL, async (s) => {
+      const problems = issues.filter((i) => i.id === s.id).map((i) => i.problem);
+      emit('scene', { id: s.id, step: `film repair ${round}`, problems });
+      const html = await writeScene(s, ctx, { problems, current: fs.readFileSync(sceneFile(ws, s), 'utf8') });
+      report.scenes[s.id].attempts++;
+      if (html && !staticProblems(html, s.id, s.duration).length) fs.writeFileSync(sceneFile(ws, s), html);
+    });
+    ({ found: issues } = await filmIssues(failing));
+    emit('measured', { round, issues });
+  }
+  for (const s of scenes.filter((x) => live(x) && issues.some((i) => i.id === x.id))) {
+    const why = issues.filter((i) => i.id === s.id).map((i) => i.problem);
+    writeFallback(ws, s, ctx);
+    report.scenes[s.id].result = 'fallback (still failing after film repairs)';
+    report.scenes[s.id].why = why;
+    emit('scene', { id: s.id, step: 'fallback', problems: why });
   }
 
   // 5. Look (optional): one vision call over the contact sheet; write-mode scenes get one repair.

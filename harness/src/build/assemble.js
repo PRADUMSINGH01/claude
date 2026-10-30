@@ -100,6 +100,9 @@ export async function assemble(ws, plan, brief, { emit = () => {} } = {}) {
 
   // Project + theme
   await freshProject(ws);
+  // The film's brief to itself, and the storylines not built, at the project root (hyperframes story.md, spec.md).
+  if (plan.spec) fs.writeFileSync(path.join(ws.projectDir, 'SPEC.md'), `${String(plan.spec).trim()}\n`);
+  if (fs.existsSync(ws.meta('STORYLINES.md'))) fs.copyFileSync(ws.meta('STORYLINES.md'), path.join(ws.projectDir, 'STORYLINES.md'));
   const themeJson = applyTheme(ws, plan.theme);
   const roles = themeRoles({ ...themeJson, roles: plan.theme.roles });
   const fonts = await prepareFonts(ws, [roles.display, roles.body]);

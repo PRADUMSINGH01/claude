@@ -32,7 +32,7 @@ pipeline it started with; `PIPELINE=agents` switches new jobs back to the agent 
 
 **`motion plan` + `motion build` — `harness/src/plan.js`, `harness/src/build/`**
 
-The cheaper split: plan in two short model calls (brief → code shortlist → plan → rating), then build
+The cheaper split: plan in a few short model calls (brief → story → code shortlist → plan → rating), then build
 with code doing the mechanical work (project, theme tokens, fonts, block installs, root `index.html`)
 and the model writing only hand-built scenes, one call each, verified per scene with
 `check --composition`, repaired at most twice, else replaced by a code fallback. Hard token cap.
@@ -44,6 +44,12 @@ and the model writing only hand-built scenes, one call each, verified per scene 
 `references/format.md#shape-of-a-project`) and mandatory sections it must read before writing.
 Agents see only a map of file names and summaries and read the rest one section at a time within a
 per-role character budget (`SKILL_READ_CHARS`, `*_SKILL_BUDGET`).
+
+The story step (`storyPass` in `harness/src/plan.js`) runs for unscripted films of 15 s or more: one
+call with the whole of `story.md` and the film type's guide (`references/types/`) returns three
+storylines and a brief rewritten around the recommended one. Code keeps what the request fixed
+(copy, timings, format, audio, colours, figures) or the original brief stands. The plan is given the
+picked storyline, and the build writes `SPEC.md` and `STORYLINES.md` into the project.
 
 The build's scene writer (`harness/src/build/scenes.js`) gets the contract plus the design sections:
 `motion.md#motion-craft`, `spec.md#composition-numbers`, `spec.md#banned-by-default` and

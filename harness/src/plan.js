@@ -1,5 +1,6 @@
-// Planning, on its own and cheap: understand → shortlist (code) → plan → rate.
-// No tool loops and nothing re-sent: two short model calls (plus one repair if the plan is invalid).
+// Planning, on its own and cheap: understand → story (films over ~15 s) → shortlist (code) → plan → rate.
+// No tool loops and nothing re-sent: a few short model calls (plus one repair per step if invalid).
+import fs from 'node:fs';
 import { config, providerForRole } from './config.js';
 import { chat } from './llm.js';
 import { SkillLibrary } from './skills/library.js';
@@ -16,7 +17,7 @@ export const GENERATED_FONTS = ['Inter', 'Space Grotesk', 'Instrument Serif', 'G
 const BRIEF_SHAPE = `{
   "title": "short name",
   "goal": "what the viewer should feel or remember, one sentence",
-  "kind": "title | explainer | launch | data | music | vertical | 3d | other",
+  "kind": "title | explainer | launch | data | music | vertical | 3d | character | other",
   "format": { "width": 1920, "height": 1080, "fps": 30, "duration": <seconds> },
   "audio": "none | sfx | music",
   "look": { "preset": "<preset name or null>", "colors": { "ground": "#hex", "ink": "#hex", "accent": "#hex", "<more names, e.g. coral, lime>": "#hex" }, "fonts": ["Family"], "mood": "3-6 words" },
@@ -102,6 +103,15 @@ export function checkBrief(brief, prompt, options = {}) {
   const missingHex = [...new Set((String(prompt).match(/#(?:[0-9a-f]{6}|[0-9a-f]{3})(?![0-9a-f])/gi) ?? []).map((h) => h.toUpperCase()))].filter((h) => !briefHex.has(h));
   if (missingHex.length && !brief.look?.preset) errs.push(`colours from the request are missing from look.colors: ${missingHex.join(', ')}; add each under its own name`);
   if (brief.look?.preset && !listThemes().some((x) => x.name === brief.look.preset)) errs.push(`unknown preset "${brief.look.preset}"`);
+  // Real numbers only (story.md §1): every figure on screen appears in the request.
+  const digits = (t) => String(t).replace(/(\d),(\d)/g, '$1$2');
+  const said = digits(`${prompt} ${options.duration ?? ''}`);
+  for (const h of holders) {
+    for (const c of h.copy ?? []) {
+      const invented = (digits(c).match(/\d+(?:\.\d+)?/g) ?? []).filter((n) => !new RegExp(`(^|[^\\d.])${n.replace('.', '\\.')}(?![\\d]|\\.\\d)`).test(said));
+      if (invented.length) errs.push(`${h.id} copy "${c}" shows ${invented.join(', ')}, which the request never gives; use only the request's figures`);
+    }
+  }
   // Presets and the generated-default fonts only when asked for (code check, not a prompt rule).
   const asked = (name) => new RegExp(`\\b${String(name).replace(/[-\s]+/g, '[-\\s]?')}\\b`, 'i').test(`${prompt} ${options.theme ?? ''}`);
   if (brief.look?.preset && !asked(brief.look.preset)) errs.push(`look.preset "${brief.look.preset}" was not asked for: presets are slide-deck looks; set look.preset null and give colours and fonts from the subject`);
@@ -115,6 +125,100 @@ export function checkBrief(brief, prompt, options = {}) {
     errs.push('background.wanted is true but the request only names a background colour; set it in look.colors.ground and set background.wanted false');
   }
   return errs;
+}
+
+// ---- 1b. Story ------------------------------------------------------------------
+// hyperframes references/story.md: a film over ~15 s that tells something gets three storylines that
+// are three different films (device × form), one picked, and beats shaped by it. With no one to ask,
+// the recommendation is built and the other two are saved (STORYLINES.md) so a later turn can switch.
+
+const TYPE_FILES = { launch: 'launch', explainer: 'explainer', data: 'data', music: 'music', vertical: 'vertical', '3d': '3d', character: 'character' };
+// A request that already gives its beats, shots or timings is followed, not re-told.
+const SCRIPTED = /\b(beat|scene|shot)\s*\d|\b\d+(\.\d+)?\s*[-–]\s*\d+(\.\d+)?\s*s\b|storyboard|\bscript\s*:/i;
+
+export function storyApplies(brief, prompt) {
+  if (SCRIPTED.test(prompt)) return { applies: false, why: 'the request gives its own beats; following them' };
+  if ((brief.format?.duration ?? 0) < 15) return { applies: false, why: 'under 15 s: the request is the story' };
+  if (brief.kind === 'title') return { applies: false, why: 'a title card: one idea' };
+  return { applies: true };
+}
+
+function storyGuides(lib, brief) {
+  const whole = (rel) => {
+    const f = lib.file('hyperframes', rel);
+    return f ? fs.readFileSync(f.abs, 'utf8').trim() : '';
+  };
+  const types = [TYPE_FILES[brief.kind], brief.format?.height > brief.format?.width && brief.kind !== 'vertical' ? 'vertical' : null].filter(Boolean);
+  return { story: whole('references/story.md'), types: types.map((t) => whole(`references/types/${t}.md`)).filter(Boolean).join('\n\n') };
+}
+
+const STORY_SHAPE = `{
+  "one_thing": "what it is, in one line", "remember": "the one thing the viewer remembers, in their words",
+  "spine": "one viewer doing one real task, and the one piece of data that travels through it",
+  "storylines": [ { "name": "", "device": "", "form": "", "sees_feels": "two sentences", "first_two_seconds": "exactly what is on screen",
+    "beats": "hook → … → end, one line", "look": "ground, type, the one material, one line", "sound": "one line" } ],
+  "pick": 0, "reason": "one clause",
+  "brief": <the whole brief, rewritten to tell the picked storyline, same shape as the input brief>
+}`;
+
+function storySystem(guides) {
+  return `You are the story editor for a short film. Follow the story guide below. Reply with JSON only, in this shape:
+${STORY_SHAPE}
+Rules:
+- Exactly three storylines that are three different films: each its own world, device and form (from the guide's tables). Sketch more in your head, keep the three that differ most, one of them the bold one. Put your recommendation in "pick" (0, 1 or 2): the one a stranger would follow and remember.
+- The rewritten brief keeps format, audio, must and avoid exactly as given, and keeps every colour and font the request gave. Colours and fonts the request left open may come from the picked storyline's look.
+- Every line of copy from the input brief stays verbatim, in exactly one beat or overlay. Keep any timings the request gives.
+- You may add short on-screen lines (at most 6 words, no trailing period) where the storyline needs them (a hook, a claim, an end line). Added lines make no claims: no numbers, names, dates or facts the request does not give. List each in assumptions as "added copy: …".
+- Beats run back to back from 0 to format.duration, shaped by the picked storyline and the guide's beat shares scaled to the length. Each beat is readable (at least 2 s, and 1 s + 0.3 s a word of its copy) and something new happens every 2–4 s. Each intent says what the beat does visually in 2–5 words, from the storyline's device and form, for a registry search (never "title card" for every beat).
+- transitions: one per seam where the picked form carries the cut ("cover": colour flood, block/slice wipe, iris; "handoff": whip, blur swap, match cut, push), "at" exactly on the seam, duration 0.3–1.2 s, varied; at most a third of the seams are plain cuts (no entry). Keep the input brief's overlays.
+- Nothing from the guide's tells (§8) or the BANNED defaults: no three cards in a row, no logo alone on frame 0, no "Introducing" opener.
+
+<story-guide>
+${guides.story}
+</story-guide>${guides.types ? `
+
+<type-guide>
+${guides.types}
+</type-guide>` : ''}`;
+}
+
+export function storylinesMarkdown(story) {
+  const lines = (story.storylines ?? []).map((x, i) => [
+    `## ${i === story.pick ? '★ ' : ''}${i + 1}. ${x.name}${i === story.pick ? ' (built)' : ''}`,
+    `- device: ${x.device} · form: ${x.form}`,
+    `- ${x.sees_feels}`,
+    `- first two seconds: ${x.first_two_seconds}`,
+    `- beats: ${x.beats}`,
+    `- look: ${x.look}`,
+    `- sound: ${x.sound}`,
+  ].join('\n'));
+  return `# Storylines\n\nThe one thing: ${story.one_thing}\nRemember: ${story.remember}\nSpine: ${story.spine}\n\nBuilt: ${story.storylines?.[story.pick]?.name} (${story.reason})\n\n${lines.join('\n\n')}\n`;
+}
+
+// The story pass may reshape beats and fill an open look; it may not change what the request fixed.
+function storyProblems(story, brief, prompt, options) {
+  const b = story?.brief;
+  if (!Array.isArray(story?.storylines) || story.storylines.length !== 3) return ['give exactly three storylines'];
+  if (!Number.isInteger(story.pick) || !story.storylines[story.pick]) return ['pick must be 0, 1 or 2'];
+  if (!Array.isArray(b?.beats)) return ['brief must be the whole rewritten brief with beats[]'];
+  const errs = [...checkBrief(b, prompt, options), ...checkSettings(b, options)];
+  for (const k of ['width', 'height', 'fps', 'duration']) if (b.format?.[k] !== brief.format?.[k]) errs.push(`brief.format.${k} must stay ${brief.format?.[k]}`);
+  if (b.audio !== brief.audio) errs.push(`brief.audio must stay "${brief.audio}"`);
+  for (const [k, v] of Object.entries(brief.look?.colors ?? {})) if (b.look?.colors?.[k] !== v) errs.push(`brief.look.colors.${k} must stay ${v}`);
+  return errs;
+}
+
+async function storyPass(askP, lib, brief, request, prompt, options, onEvent) {
+  const system = storySystem(storyGuides(lib, brief));
+  const input = `${request}\n\n<brief>\n${JSON.stringify(brief, null, 1)}\n</brief>`;
+  let story = await askP(system, input);
+  let errs = storyProblems(story, brief, prompt, options);
+  if (errs.length) {
+    onEvent({ type: 'repair', step: 'story', errors: errs });
+    story = await askP(system, `${input}\n\nYour previous reply had these problems; fix them and reply with the whole JSON:\n- ${errs.join('\n- ')}\n\nPrevious reply:\n${JSON.stringify(story)}`);
+    errs = storyProblems(story, brief, prompt, options);
+  }
+  return { story, errs };
 }
 
 // ---- 2. Shortlist (code only) ------------------------------------------------
@@ -484,6 +588,27 @@ export async function runPlan({ prompt, options = {}, onEvent = () => {}, jobsDi
   ws.writeJson('brief.json', brief);
   onEvent({ type: 'brief', brief, errors: briefErrs });
 
+  // 1b. Story: three storylines, build the recommended one (falls back to the brief if it can't keep it intact).
+  let storyline = null;
+  const gate = storyApplies(brief, prompt);
+  if (gate.applies) {
+    onEvent({ type: 'step', step: 'story' });
+    const { story, errs } = await storyPass(askP, lib, brief, request, prompt, options, onEvent);
+    if (!errs.length) {
+      ws.writeJson('brief.original.json', brief);
+      brief = story.brief;
+      storyline = story.storylines[story.pick];
+      ws.writeJson('brief.json', brief);
+      ws.writeJson('story.json', story);
+      fs.writeFileSync(ws.meta('STORYLINES.md'), storylinesMarkdown(story));
+      onEvent({ type: 'story', story, brief });
+    } else {
+      onEvent({ type: 'story', skipped: `the storyline broke the brief: ${errs.join('; ')}` });
+    }
+  } else {
+    onEvent({ type: 'story', skipped: gate.why });
+  }
+
   // 2. Shortlist (code)
   onEvent({ type: 'step', step: 'shortlist' });
   const lists = await shortlist(ws, brief, prompt);
@@ -493,7 +618,11 @@ export async function runPlan({ prompt, options = {}, onEvent = () => {}, jobsDi
   // 3. Plan
   onEvent({ type: 'step', step: 'plan' });
   const system = planSystem(lib);
-  const input = `<brief>\n${JSON.stringify(brief, null, 1)}\n</brief>\n\n<shortlist>\n${shortlistText(lists)}\n</shortlist>`;
+  const input = [
+    `<brief>\n${JSON.stringify(brief, null, 1)}\n</brief>`,
+    storyline ? `<storyline>\nThe film tells this storyline; SPEC.md, each scene's build and motion follow it.\n${JSON.stringify(storyline, null, 1)}\n</storyline>` : null,
+    `<shortlist>\n${shortlistText(lists)}\n</shortlist>`,
+  ].filter(Boolean).join('\n\n');
   const ctx = { ws, seenRegistry: new Set(allItems(lists).map((i) => i.name)), readLog: new Set() };
   const validate = async (p) => {
     if (!Array.isArray(p?.scenes)) return 'reply was not a plan object with scenes[] (cut off or invalid JSON); reply with the whole plan';

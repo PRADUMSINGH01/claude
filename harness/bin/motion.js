@@ -35,7 +35,7 @@ const { values, positionals } = parseArgs({
 const [cmd, ...rest] = positionals;
 const USAGE = `motion run "<prompt>" [--theme <preset>] [--aspect 16:9|9:16|1:1] [--duration <s>] [--json]
 motion resume <job-dir> [--json]
-motion plan "<prompt>"           plan only (no video): brief → shortlist → plan → rating
+motion plan "<prompt>"           plan only (no video): brief → story → shortlist → plan → rating
 motion build <plan-job-dir>      build an approved plan: assemble → write scenes → verify → render  [--look] [--no-render] [--max-tokens N]
 motion providers                 which AI providers have keys, their models, which role uses which
 motion themes
@@ -87,6 +87,10 @@ function printPlanEvent(ev) {
   switch (ev.type) {
     case 'step': return console.log(`\n■ ${ev.step}${ev.provider ? `  (${ev.provider})` : ''}`);
     case 'repair': return console.log(`  ↻ repair ${ev.step}: ${ev.errors.join(' | ').slice(0, 300)}`);
+    case 'story':
+      if (ev.skipped) return console.log(`  story: skipped (${ev.skipped})`);
+      ev.story.storylines.forEach((x, i) => console.log(`  ${i === ev.story.pick ? '★' : ' '} ${x.name}: ${x.device} · ${x.form}`));
+      return console.log(`  built: ${ev.story.storylines[ev.story.pick].name} (${ev.story.reason})`);
     case 'brief': {
       const b = ev.brief;
       console.log(`  "${b.title}" — ${b.kind}, ${b.format?.width}x${b.format?.height}, ${b.format?.duration}s, audio ${b.audio}`);

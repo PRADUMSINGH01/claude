@@ -527,6 +527,10 @@ function formatLogLine(ev) {
       return `Repair ${ev.step}: ${(ev.errors || []).join(' | ').slice(0, 300)}`;
     case 'plan':
       return `Plan ready: ${ev.plan?.scenes?.length || 0} scenes, ${ev.usage?.calls || 0} calls`;
+    case 'story':
+      return ev.skipped
+        ? `Story: skipped (${ev.skipped})`
+        : `Story: built "${ev.story?.storylines?.[ev.story.pick]?.name}" — others: ${(ev.story?.storylines || []).filter((_, i) => i !== ev.story.pick).map((x) => x.name).join(', ')}`;
     case 'plan_warnings':
       return `Plan warnings: ${(ev.problems || []).join(' | ').slice(0, 300)}`;
     case 'call':
@@ -685,6 +689,7 @@ function createHarnessEventHandler(job) {
       case 'step': {
         const s = {
           understand: ['designing', 'Reading the brief: copy, timing, look...'],
+          story: ['designing', 'Writing three storylines and picking one...'],
           shortlist: ['planning', 'Shortlisting registry blocks for each beat...'],
           plan: ['planning', 'Planning scenes, theme & SPEC...'],
           assemble: ['building', 'Assembling project: theme, fonts, blocks, timeline...'],

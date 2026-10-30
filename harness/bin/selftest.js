@@ -216,6 +216,24 @@ await step('brief keeps every colour the request gives (code check, not a prompt
   assert.deepEqual(checkBrief({ ...base, look: { preset: 'coral', colors: {} } }, 'theme: coral, "GO"'), []);
 });
 
+await step('story step: only for unscripted films over 15 s; figures on screen come from the request', async () => {
+  const { storyApplies, checkBrief, storylinesMarkdown } = await import('../src/plan.js');
+  const brief = (duration, kind = 'launch') => ({ kind, format: { duration } });
+  assert.equal(storyApplies(brief(30), 'A launch film for Ferry, a ferry booking app').applies, true);
+  assert.equal(storyApplies(brief(10), 'A launch film for Ferry').applies, false);
+  assert.equal(storyApplies(brief(30, 'title'), 'A title card').applies, false);
+  assert.equal(storyApplies(brief(30), 'Beat 1: "Hello". Beat 2: "World"').applies, false);
+  assert.equal(storyApplies(brief(30), 'headline 0-5 s, logo 5-10 s').applies, false);
+  const one = (copy) => ({ format: { duration: 4 }, background: { wanted: false }, beats: [{ id: 'a', start: 0, end: 4, copy: [copy] }] });
+  const said = 'Builds went from 40 min to 2 min for 1,200 teams';
+  assert.deepEqual(checkBrief(one('40 min to 2 min'), said), []);
+  assert.deepEqual(checkBrief(one('1200 teams'), said), []);
+  assert.match(checkBrief(one('20x faster'), said).join(), /shows 20, which the request never gives/);
+  const md = storylinesMarkdown({ one_thing: 'x', remember: 'y', spine: 'z', pick: 1, reason: 'r', storylines: ['A', 'B', 'C'].map((name) => ({ name, device: 'd', form: 'f' })) });
+  assert.match(md, /## ★ 2\. B \(built\)/);
+  assert.match(md, /## 1\. A\n/);
+});
+
 await step('access rules', () => {
   assert.equal(canRead('builder', 'hyperframes-cli', 'references/cloud.md'), false);
   assert.equal(canRead('planner', 'hyperframes', 'assets/frame-presets/coral/FRAME.md'), true);

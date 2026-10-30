@@ -183,6 +183,8 @@ await step('model JSON: whole reply or nothing (a cut-off plan must not parse as
   assert.equal(parseModelJson('{"title":"x","scenes":[{"id":"a","vars":{"k":1}},{"id":"b"'), null);
   assert.equal(parseModelJson('no json here'), null);
   assert.equal(parseModelJson('[1,2]'), null);
+  // Arithmetic a model left in a value is worked out; the same text inside a string is not touched.
+  assert.deepEqual(parseModelJson('{"start": 3 - 0.6 / 2, "d": -1 + 4*2, "s": "at: 3 - 1,"}'), { start: 2.7, d: 7, s: 'at: 3 - 1,' });
 });
 
 await step('transitions: on seams, cover scenes centred and text-free, handoffs need no scene', async () => {

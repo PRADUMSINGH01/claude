@@ -313,7 +313,7 @@ function planSystem(lib) {
 ${PLAN_SHAPE}
 Rules:
 - One main scene per beat, same id, start and duration as the brief. Each brief overlay is ONE scene with layer "overlay", same id and time range. A background the brief wants is ONE scene with layer "background" spanning the whole film; add no background or overlay the brief does not have.
-- Each brief transition of kind "cover" is ONE scene with layer "transition", same id, start = at - duration/2, that duration, no text: it covers the whole frame at its midpoint (hiding the cut) in theme colours and uncovers into the next beat. Use a block from its shortlist only if one fits, else hand-build (build says the shapes, colours and direction).
+- Each brief transition of kind "cover" is ONE scene with layer "transition", same id, start = at - duration/2 written as the computed number (2.7, never "3 - 0.6/2"), that duration, no text: it covers the whole frame at its midpoint (hiding the cut) in theme colours and uncovers into the next beat. Use a block from its shortlist only if one fits, else hand-build (build says the shapes, colours and direction).
 - For a "handoff" transition there is no scene: the outgoing beat's motion ends with the exit and the next beat's motion starts with the matching entrance (e.g. whip: smear out 0.2 s / land blurred and sharpen 0.13 s). Say this in both scenes' motion.
 - vars holds only variable ids that the chosen block or components list. A hand-built scene with no components has empty vars: its layout, sizes and fonts go in build.
 - For each scene pick a block from that beat's shortlist BY ITS DESCRIPTION: what it shows must match the beat's intent AND the brief's look.mood (no 3D spectacle for a calm editorial piece, no diagram plates for a wordmark, no chat UI for a headline). If nothing fits, use null and hand-build.
@@ -533,12 +533,41 @@ export function parseModelJson(text) {
   const a = s.indexOf('{');
   const b = s.lastIndexOf('}');
   if (a < 0 || b <= a) return null;
-  try {
-    const v = JSON.parse(s.slice(a, b + 1));
-    return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
-  } catch {
-    return null;
+  const body = s.slice(a, b + 1);
+  for (const text of [body, withArithmeticDone(body)]) {
+    try {
+      const v = JSON.parse(text);
+      return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
+    } catch { /* try the next form */ }
   }
+  return null;
+}
+
+// Some models write a value as the sum it came from ("start": 3 - 0.6 / 2). Outside strings only,
+// a value that is plain numbers and + - * / becomes its result; anything else is left to fail.
+const NUM = String.raw`-?\d+(?:\.\d+)?`;
+const ARITH_VALUE = new RegExp(String.raw`("(?:[^"\\]|\\.)*")|(:\s*)(${NUM}(?:\s*[-+*/]\s*${NUM})+)(?=\s*[,}\]])`, 'g');
+
+function withArithmeticDone(text) {
+  return text.replace(ARITH_VALUE, (m, str, colon, expr) => {
+    if (str !== undefined) return m;
+    const v = evalArithmetic(expr);
+    return Number.isFinite(v) ? `${colon}${+v.toFixed(6)}` : m;
+  });
+}
+
+function evalArithmetic(expr) {
+  const tokens = expr.match(new RegExp(String.raw`${NUM}|[-+*/]`, 'g'));
+  // Products first, then sums, left to right.
+  const terms = [Number(tokens[0])];
+  const signs = [];
+  for (let i = 1; i < tokens.length; i += 2) {
+    const [op, n] = [tokens[i], Number(tokens[i + 1])];
+    if (op === '*') terms[terms.length - 1] *= n;
+    else if (op === '/') terms[terms.length - 1] /= n;
+    else { signs.push(op); terms.push(n); }
+  }
+  return terms.slice(1).reduce((acc, t, i) => (signs[i] === '+' ? acc + t : acc - t), terms[0]);
 }
 
 // Settings picked in the app (aspect, length, theme) arrive as options, not prompt text.

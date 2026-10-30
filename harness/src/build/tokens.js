@@ -3,7 +3,7 @@
 // --accent-2, --brand and --font-display (and the presets' caption skins read --cap-*). We set all of
 // them from the theme so mounted blocks and components pick the theme up without edits.
 
-import { buildPalette } from './palette.js';
+import { buildPalette, contrast, INK_CONTRAST } from './palette.js';
 
 const hexToRgb = (hex) => {
   const m = /^#?([0-9a-f]{6}|[0-9a-f]{3})(?![0-9a-f])/i.exec(String(hex).trim());
@@ -48,6 +48,11 @@ export function themeRoles(theme) {
   const byLum = Object.values(colors).filter((c) => luminance(c) != null).sort((a, b) => luminance(b) - luminance(a));
   ground ??= byLum[0];
   ink ??= byLum.at(-1);
+  // Ink is the theme colour that reads hardest on the ground (a named "ink" that barely reads loses).
+  if (ground && ink) {
+    const best = Object.values(colors).filter((c) => c !== ground).sort((a, b) => contrast(b, ground) - contrast(a, ground))[0];
+    if (best && contrast(ink, ground) < INK_CONTRAST && contrast(best, ground) > contrast(ink, ground)) ink = best;
+  }
   if (ground && ink && ground === ink) ink = luminance(ground) > 0.5 ? '#111111' : '#FFFFFF';
   accent ??= Object.values(colors).filter((c) => c !== ground && c !== ink).sort((a, b) => saturation(b) - saturation(a))[0] ?? ink;
   const accent2 = Object.values(colors).filter((c) => ![ground, ink, accent].includes(c)).sort((a, b) => saturation(b) - saturation(a))[0] ?? accent;

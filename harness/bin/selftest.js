@@ -172,6 +172,15 @@ await step('registry first: vetting, several queries per beat, use-or-justify, d
   assert.equal(justified.length, 0);
 });
 
+await step('fonts: a workhorse family is not the display face unless asked; the mood list is offered', async () => {
+  const { checkBrief, DISPLAY_FONTS } = await import('../src/plan.js');
+  const brief = (fonts) => ({ format: { duration: 6 }, look: { fonts }, background: { wanted: false }, beats: [{ id: 'a', start: 0, end: 6, copy: [] }] });
+  assert.match(checkBrief(brief(['Archivo', 'Karla']), 'a promo').join(), /display font "Archivo" is a generic workhorse/);
+  assert.equal(checkBrief(brief(['Bungee', 'Karla']), 'a promo').filter((e) => /font/.test(e)).length, 0, 'a workhorse body face is fine');
+  assert.equal(checkBrief(brief(['Montserrat']), 'set it in Montserrat').filter((e) => /font/.test(e)).length, 0, 'asked for by name');
+  assert.ok(Object.values(DISPLAY_FONTS).flat().length >= 30);
+});
+
 await step('brief: a long beat splits into a copy beat and picture beats, unless the request gives timings', async () => {
   const { checkBrief } = await import('../src/plan.js');
   const brief = { format: { duration: 25 }, look: {}, background: { wanted: false }, beats: [{ id: 'a', start: 0, end: 12, copy: ['Tidepool'] }, { id: 'b', start: 12, end: 25, copy: ['Know before you paddle out'] }] };
@@ -292,13 +301,18 @@ await step('palette: full colour world from the theme; given colours kept; block
   const { buildPalette, roleColour, shaderColours, oklch, contrast } = await import('../src/build/palette.js');
   const { shaderProps } = await import('../src/build/assemble.js');
   const p = buildPalette({ ground: '#07101F', ink: '#F0EBDE', accent: '#5560E5' });
-  assert.equal(p.accent, '#5560E5');
+  // Text roles read hard: an accent under 4.5:1 is lifted in lightness, hue kept (#5560E5 is 3.8:1 here).
+  assert.ok(contrast(p.accent, p.ground) >= 4.5 && Math.abs(oklch(p.accent)[2] - oklch('#5560E5')[2]) < 2);
   assert.equal(p.ink, '#F0EBDE');
   assert.notEqual(p.accent2, p.accent, 'a missing second accent is derived, not a copy');
   const h = oklch(p.accent2)[2];
   assert.ok(h < 285 || h > 330, `second accent hue ${h} is out of the violet band`);
   assert.ok(contrast(p.muted, p.ground) >= 4.5 && contrast(p.accent2, p.ground) >= 3);
-  assert.match(buildPalette({ ground: '#FFFFFF', ink: '#BBBBBB', accent: '#FFE600' }).warnings.join(), /1\.9:1.*4\.5:1/);
+  const weak = buildPalette({ ground: '#FFFFFF', ink: '#BBBBBB', accent: '#FFE600' });
+  assert.ok(contrast(weak.ink, '#FFFFFF') >= 7 && contrast(weak.accent, '#FFFFFF') >= 4.5, 'pale ink and yellow accent are darkened until they read');
+  assert.match(weak.warnings.join(), /ink #BBBBBB on ground #FFFFFF was 1\.9:1; text uses/);
+  const { themeRoles } = await import('../src/build/tokens.js');
+  assert.ok(contrast(themeRoles({ colors: { ground: '#FBF3E4', ink: '#F97316', accent: '#FACC15' } }).ink, '#FBF3E4') >= 7, 'orange ink on cream is deepened');
   assert.equal(roleColour('bgColor', '#000000', p), p.ground);
   assert.equal(roleColour('titleColor', '#ffffff', p), p.ink);
   assert.ok([p.accent, p.accent2].includes(roleColour('c1', '#22ee88', p)), 'a saturated default maps to an accent');

@@ -15,6 +15,22 @@ import { resolveLook } from './look.js';
 
 // Where generated design lands when nothing is decided (hyperframes references/look.md#the-look-line).
 export const GENERATED_FONTS = ['Inter', 'Space Grotesk', 'Instrument Serif', 'Geist', 'JetBrains Mono'];
+// Workhorse families: fine for body text, generic as the display face (fonts[0]) unless asked for.
+export const GENERIC_DISPLAY = ['Poppins', 'Montserrat', 'Roboto', 'Open Sans', 'Lato', 'Public Sans', 'Source Sans 3', 'Source Sans Pro',
+  'Archivo', 'DM Sans', 'Manrope', 'Outfit', 'Work Sans', 'Nunito', 'Nunito Sans', 'Raleway', 'Merriweather', 'Playfair Display',
+  'Noto Sans', 'IBM Plex Sans', 'Plus Jakarta Sans', 'Rubik', 'Mulish', 'Karla', 'Figtree', 'Sora', 'Lexend', 'Cormorant Garamond'];
+// Display families with character, by mood (all on Google Fonts): a starting point, not a closed list.
+export const DISPLAY_FONTS = {
+  'loud, festive, bold': ['Bungee', 'Rubik Mono One', 'Dela Gothic One', 'Climate Crisis'],
+  'playful, kids, bouncy': ['Fredoka', 'Baloo 2', 'Chewy', 'Sniglet'],
+  'retro, 80s, neon': ['Monoton', 'Righteous', 'Tilt Neon', 'Bungee Shade'],
+  'editorial, serious, data': ['Fraunces', 'Newsreader', 'Bodoni Moda', 'Young Serif'],
+  'tech, product, modern': ['Syne', 'Unbounded', 'Bricolage Grotesque', 'Familjen Grotesk'],
+  'warm, handmade, craft': ['Caprasimo', 'Gloock', 'Yeseva One', 'Shrikhand'],
+  'fresh, food, drink': ['Lilita One', 'Titan One', 'Gluten', 'Shrikhand'],
+  'elegant, luxury, calm': ['Italiana', 'Marcellus', 'Bodoni Moda', 'Cinzel'],
+  'outdoor, sport, surf': ['Bowlby One', 'Big Shoulders Display', 'Alfa Slab One', 'Rammetto One'],
+};
 
 const BRIEF_SHAPE = `{
   "title": "short name",
@@ -44,6 +60,7 @@ Rules:
 - Colours: put EVERY colour the request gives into look.colors, hex exactly as written: ground, ink and accent for the main roles, then one named key per extra colour (e.g. "coral": "#FF5A5F"). If it names a theme preset, set look.preset and leave colors empty. Fonts as named.
 - look.preset only when the request (or the app settings) names a preset: presets are slide-deck looks, never the fallback for a film. Otherwise leave it null and fill look.colors and look.fonts.
 - When the request gives no colours or fonts, take them from the subject's own world (its era, its materials, where it would be shown), never from habit. Avoid the defaults generated video lands on unless the request asks for them: ${GENERATED_FONTS.join(', ')} as fonts; a near-black or navy void as the ground; purple or blue gradients; a cream-paper ground with a serif display. Fonts are real Google Fonts families.
+- look.fonts is [display, body]. The display face carries the film's character: never a workhorse (${GENERIC_DISPLAY.slice(0, 12).join(', ')}…) unless asked. Start from these by mood, or another distinctive family: ${Object.entries(DISPLAY_FONTS).map(([m, f]) => `${m}: ${f.join(', ')}`).join('; ')}. The body face is a clean, readable sans or serif.
 - Defaults when silent: 1920x1080, 30 fps, 15 s, audio "none". Record every default you applied in assumptions.
 - background.wanted is true only when the request asks for a visual background layer (a shader, gradient, aurora, texture, pattern, footage) running under the beats. A background colour ("dark background", "white space") is look.colors.ground, not a layer.`;
 
@@ -148,6 +165,10 @@ export function checkBrief(brief, prompt, options = {}) {
   const asked = (name) => new RegExp(`\\b${String(name).replace(/[-\s]+/g, '[-\\s]?')}\\b`, 'i').test(`${prompt} ${options.theme ?? ''}`);
   if (brief.look?.preset && !asked(brief.look.preset)) errs.push(`look.preset "${brief.look.preset}" was not asked for: presets are slide-deck looks; set look.preset null and give colours and fonts from the subject`);
   for (const f of brief.look?.fonts ?? []) if (GENERATED_FONTS.some((g) => g.toLowerCase() === String(f).toLowerCase()) && !asked(f)) errs.push(`font "${f}" is a generated-video default the request did not ask for; pick a family from the subject's world`);
+  const display = brief.look?.fonts?.[0];
+  if (display && !brief.look?.preset && GENERIC_DISPLAY.some((g) => g.toLowerCase() === String(display).toLowerCase()) && !asked(display)) {
+    errs.push(`display font "${display}" is a generic workhorse; give the film a display face with character (look.fonts[0]), keep "${display}" as the body face if you like`);
+  }
   for (const b of brief.beats ?? []) {
     for (const c of b.copy ?? []) if (INSTRUCTION_WORDS.test(c)) errs.push(`beat ${b.id} copy "${c}" reads like an instruction, not on-screen text; put only the words the viewer sees`);
     const floor = readFloor(b.copy ?? []);

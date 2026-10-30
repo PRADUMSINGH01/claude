@@ -97,23 +97,33 @@ export function nearest(hex, candidates) {
   return candidates.filter(Boolean).reduce((best, c) => (distance(hex, c) < distance(hex, best) ? c : best));
 }
 
+// Text roles read hard against the ground: ink 7:1, accents 4.5:1 (they carry headline words).
+export const INK_CONTRAST = 7;
+export const ACCENT_CONTRAST = 4.5;
+
 // Every role a scene or block may need, from ground, ink and one or two accents.
-// - Given colours stay exactly as given (look.md: quote hex values exactly); a pair that reads badly
-//   (ink under 4.5:1 on the ground, the accent under 3:1) is reported, not changed.
+// - Given colours stay exactly as given in the theme's named colours (look.md: quote hex values
+//   exactly), so shapes and fills can use them; the text roles (ink, accents) are moved in lightness,
+//   hue kept, until they read at INK_CONTRAST / ACCENT_CONTRAST, and the change is reported.
 // - A missing second accent is the first turned 35° in hue (away from violet), not a copy of it.
 // - surface, muted, line and accent-soft are mixes, so they stay inside the colour world; the derived
 //   ones that carry text are lifted until they read.
 export function buildPalette({ ground, ink, accent, accent2 }) {
   const dark = (luminance(ground) ?? 0) < 0.18;
   const warnings = [];
-  if (contrast(ink, ground) < 4.5) warnings.push(`ink ${ink} on ground ${ground} is ${contrast(ink, ground).toFixed(1)}:1 (text needs 4.5:1)`);
-  if (contrast(accent, ground) < 3) warnings.push(`accent ${accent} on ground ${ground} is ${contrast(accent, ground).toFixed(1)}:1 (large type needs 3:1)`);
-  let acc2 = accent2 && accent2.toUpperCase() !== accent.toUpperCase() ? accent2.toUpperCase() : null;
+  const lift = (role, hex, min) => {
+    const out = ensureContrast(hex, ground, min);
+    if (out !== hex.toUpperCase()) warnings.push(`${role} ${hex} on ground ${ground} was ${contrast(hex, ground).toFixed(1)}:1; text uses ${out} (${contrast(out, ground).toFixed(1)}:1)`);
+    return out;
+  };
+  ink = lift('ink', ink, INK_CONTRAST);
+  accent = lift('accent', accent, ACCENT_CONTRAST);
+  let acc2 = accent2 && accent2.toUpperCase() !== accent.toUpperCase() ? lift('accent2', accent2, ACCENT_CONTRAST) : null;
   if (!acc2) {
     const [L, C, H] = oklch(accent);
     // Turn away from the violet band (spec.md BANNED: purple and blue gradients) when +35° lands in it.
     const turned = [(H + 35) % 360, (H + 325) % 360].find((h) => h < 285 || h > 330) ?? (H + 35) % 360;
-    acc2 = ensureContrast(C < 0.04 ? mix(accent, ink, 0.5) : fromOklch([L, C, turned]), ground, 3);
+    acc2 = ensureContrast(C < 0.04 ? mix(accent, ink, 0.5) : fromOklch([L, C, turned]), ground, ACCENT_CONTRAST);
   }
   return {
     ground: ground.toUpperCase(),

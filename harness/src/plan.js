@@ -8,6 +8,7 @@ import { readSection } from './tools/skill-tools.js';
 import { catalogSearch, inspectItem, listThemes } from './tools/registry-tools.js';
 import { opaqueOverBackground, plannerHandoff } from './roles/planner.js';
 import { Workspace } from './workspace.js';
+import { resolveLook } from './look.js';
 
 // ---- 1. Understand -----------------------------------------------------------
 
@@ -208,14 +209,16 @@ function storyProblems(story, brief, prompt, options) {
   return errs;
 }
 
-async function storyPass(askP, lib, brief, request, prompt, options, onEvent) {
+async function storyPass(askP, lib, brief, request, prompt, options, onEvent, withLook = (b) => b) {
   const system = storySystem(storyGuides(lib, brief));
   const input = `${request}\n\n<brief>\n${JSON.stringify(brief, null, 1)}\n</brief>`;
   let story = await askP(system, input);
+  if (story?.brief) withLook(story.brief);
   let errs = storyProblems(story, brief, prompt, options);
   if (errs.length) {
     onEvent({ type: 'repair', step: 'story', errors: errs });
     story = await askP(system, `${input}\n\nYour previous reply had these problems; fix them and reply with the whole JSON:\n- ${errs.join('\n- ')}\n\nPrevious reply:\n${JSON.stringify(story)}`);
+    if (story?.brief) withLook(story.brief);
     errs = storyProblems(story, brief, prompt, options);
   }
   return { story, errs };
@@ -573,11 +576,15 @@ function evalArithmetic(expr) {
 // Settings picked in the app (aspect, length, theme) arrive as options, not prompt text.
 const ASPECT = { '16:9': [1920, 1080], '9:16': [1080, 1920], '1:1': [1080, 1080] };
 
-function settingsText(options = {}) {
+function settingsText(options = {}, look = null) {
   const lines = [];
+  if (look) {
+    const c = look.colors;
+    lines.push(`- Colours (from the ${look.source}): ground ${c.ground}, ink ${c.ink}, accent ${c.accent}${c.accent2 ? `, accent2 ${c.accent2}` : ''}. These are the film's look.colors exactly; set look.preset null.${look.mood ? ` Mood: ${look.mood}.` : ''}`);
+  }
   if (ASPECT[options.aspect]) lines.push(`- Aspect ${options.aspect}: ${ASPECT[options.aspect].join('x')}.`);
   if (options.duration) lines.push(`- Duration: ${options.duration} s, unless the request itself gives a length.`);
-  if (options.theme && listThemes().some((t) => t.name === options.theme)) lines.push(`- Theme preset: ${options.theme} (set look.preset).`);
+  if (!look && options.theme && listThemes().some((t) => t.name === options.theme)) lines.push(`- Theme preset: ${options.theme} (set look.preset).`);
   return lines.length ? `\n\nSettings chosen in the app:\n${lines.join('\n')}` : '';
 }
 
@@ -598,16 +605,34 @@ export async function runPlan({ prompt, options = {}, onEvent = () => {}, jobsDi
   ws.writeJson('request.json', { ...prior, prompt, options, createdAt: prior.createdAt ?? new Date().toISOString(), mode });
   onEvent({ type: 'job_start', job: ws.id, dir: ws.dir, resume: Boolean(dir) });
   const askP = (system, user) => ask(provider, system, user, usage, { signal });
-  const request = `${prompt}${settingsText(options)}`;
+
+  // 0. Colours chosen in the app: a named palette, a colour reference image, or exact roles. Code
+  //    writes them into every brief, so the model can't drift from them.
+  let look = null;
+  if (options.palette || options.colorRef || options.colors) {
+    onEvent({ type: 'step', step: 'palette' });
+    look = await resolveLook(ws, options);
+    ws.writeJson('palette.json', look);
+    // Keep the resolved colours, not the image, so a resumed job re-plans without the reference.
+    const kept = { ...options, colors: look.colors, colorsSource: look.source };
+    if (options.colorRef) kept.colorRef = /^data:/i.test(options.colorRef) ? '(embedded image)' : options.colorRef;
+    ws.writeJson('request.json', { ...ws.readJson('request.json', {}), options: kept });
+    onEvent({ type: 'palette', source: look.source, colors: look.colors, palette: look.palette, swatches: look.swatches ?? null });
+  }
+  const withLook = (b) => {
+    if (look && b && typeof b === 'object') b.look = { ...(b.look ?? {}), preset: null, colors: { ...look.colors }, ...(look.mood ? { mood: look.mood } : {}) };
+    return b;
+  };
+  const request = `${prompt}${settingsText(options, look)}`;
   const briefProblems = (b) => (Array.isArray(b?.beats) ? [...checkBrief(b, prompt, options), ...checkSettings(b, options)] : ['reply was not a brief object with beats[] (cut off or invalid JSON)']);
 
   // 1. Understand
   onEvent({ type: 'step', step: 'understand', provider: `${provider.name}/${provider.model}` });
-  let brief = await askP(UNDERSTAND_SYSTEM, request);
+  let brief = withLook(await askP(UNDERSTAND_SYSTEM, request));
   let briefErrs = briefProblems(brief);
   if (briefErrs.length) {
     onEvent({ type: 'repair', step: 'understand', errors: briefErrs });
-    brief = await askP(UNDERSTAND_SYSTEM, `${request}\n\nYour previous brief had these problems; fix them:\n- ${briefErrs.join('\n- ')}\n\nPrevious brief:\n${JSON.stringify(brief)}`);
+    brief = withLook(await askP(UNDERSTAND_SYSTEM, `${request}\n\nYour previous brief had these problems; fix them:\n- ${briefErrs.join('\n- ')}\n\nPrevious brief:\n${JSON.stringify(brief)}`));
     briefErrs = briefProblems(brief);
   }
   if (!Array.isArray(brief?.beats)) {
@@ -622,7 +647,7 @@ export async function runPlan({ prompt, options = {}, onEvent = () => {}, jobsDi
   const gate = storyApplies(brief, prompt);
   if (gate.applies) {
     onEvent({ type: 'step', step: 'story' });
-    const { story, errs } = await storyPass(askP, lib, brief, request, prompt, options, onEvent);
+    const { story, errs } = await storyPass(askP, lib, brief, request, prompt, options, onEvent, withLook);
     if (!errs.length) {
       ws.writeJson('brief.original.json', brief);
       brief = story.brief;

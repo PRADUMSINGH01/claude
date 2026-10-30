@@ -10,12 +10,15 @@ import { runBuild } from '../src/build/index.js';
 import { SkillLibrary } from '../src/skills/library.js';
 import { skillMap } from '../src/tools/skill-tools.js';
 import { listThemes } from '../src/tools/registry-tools.js';
+import { PALETTES } from '../src/look.js';
 import { consoleLines } from '../src/transcript.js';
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
     theme: { type: 'string' },
+    palette: { type: 'string' },
+    'color-ref': { type: 'string' },
     aspect: { type: 'string' },
     duration: { type: 'string' },
     jobs: { type: 'string' },
@@ -36,6 +39,8 @@ const [cmd, ...rest] = positionals;
 const USAGE = `motion run "<prompt>" [--theme <preset>] [--aspect 16:9|9:16|1:1] [--duration <s>] [--json]
 motion resume <job-dir> [--json]
 motion plan "<prompt>"           plan only (no video): brief → story → shortlist → plan → rating
+                                 [--palette <id>] [--color-ref <image file|https URL>] [--aspect] [--duration] [--theme]
+motion palettes                  named colour palettes for --palette
 motion build <plan-job-dir>      build an approved plan: assemble → write scenes → verify → render  [--look] [--no-render] [--max-tokens N]
 motion providers                 which AI providers have keys, their models, which role uses which
 motion themes
@@ -87,6 +92,7 @@ function printPlanEvent(ev) {
   switch (ev.type) {
     case 'step': return console.log(`\n■ ${ev.step}${ev.provider ? `  (${ev.provider})` : ''}`);
     case 'repair': return console.log(`  ↻ repair ${ev.step}: ${ev.errors.join(' | ').slice(0, 300)}`);
+    case 'palette': return console.log(`  colours from the ${ev.source}: ${Object.entries(ev.colors).map(([k, v]) => `${k} ${v}`).join(', ')}${ev.swatches ? `\n  swatches: ${ev.swatches.map((x) => `${x.hex} ${Math.round(x.weight * 100)}%`).join(', ')}` : ''}`);
     case 'story':
       if (ev.skipped) return console.log(`  story: skipped (${ev.skipped})`);
       ev.story.storylines.forEach((x, i) => console.log(`  ${i === ev.story.pick ? '★' : ' '} ${x.name}: ${x.device} · ${x.form}`));
@@ -141,7 +147,13 @@ try {
     if (values.json) console.log(JSON.stringify({ type: 'result', ...r }));
     if (r.render && !r.render.ok) process.exitCode = 2;
   } else if (cmd === 'plan') {
-    const r = await runPlan({ prompt: rest.join(' '), jobsDir: values.jobs, onEvent: printPlanEvent });
+    const options = {};
+    if (values.aspect) options.aspect = values.aspect;
+    if (values.duration) options.duration = Number(values.duration);
+    if (values.theme) options.theme = values.theme;
+    if (values.palette) options.palette = values.palette;
+    if (values['color-ref']) options.colorRef = values['color-ref'];
+    const r = await runPlan({ prompt: rest.join(' '), options, jobsDir: values.jobs, onEvent: printPlanEvent });
     if (values.json) console.log(JSON.stringify({ type: 'result', job: r.job, rating: r.rating, usage: r.usage }));
     else console.log(`\nSaved: ${r.dir}\\harness (brief.json, shortlist.json, plan.json, rating.json)`);
   } else if (cmd === 'providers') {
@@ -149,6 +161,8 @@ try {
       const state = p.ready ? 'ready  ' : `no key (${p.keyVar})`;
       console.log(`${p.name.padEnd(7)} ${state.padEnd(30)} ${p.model.padEnd(24)} vision:${p.vision ? 'yes' : 'no '}  ${p.roles.length ? `← ${p.roles.join(', ')}` : ''}`);
     }
+  } else if (cmd === 'palettes') {
+    for (const p of PALETTES) console.log(`${p.id.padEnd(16)} ${Object.values(p.colors).join(' ')}  ${p.mood}`);
   } else if (cmd === 'themes') {
     for (const t of listThemes()) console.log(`${t.name.padEnd(18)} ${t.fonts.join(' + ')}  ${Object.values(t.colors).slice(0, 5).join(' ')}`);
   } else if (cmd === 'skills') {

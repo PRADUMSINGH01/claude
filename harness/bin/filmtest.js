@@ -190,6 +190,14 @@ try {
   assert.deepEqual(kept.brief.beats.map((b) => b.id), ['name', 'claim']);
   assert.ok(!fs.existsSync(path.join(kept.dir, 'harness', 'STORYLINES.md')));
   console.log('ok  a storyline that loses the request\'s copy is rejected');
+
+  // 6. A palette picked in the app: its colours go into the brief exactly, whatever the model wrote.
+  const picked = await runPlan({ prompt: PROMPT, options: { palette: 'teal-orange' }, jobsDir: jobs, judge: false });
+  assert.deepEqual(picked.brief.look.colors, { ground: '#0F3B40', ink: '#F3EDE4', accent: '#F28C38', accent2: '#6CC3C1' });
+  assert.equal(picked.brief.look.preset, null);
+  const saved = JSON.parse(fs.readFileSync(path.join(picked.dir, 'harness', 'request.json'), 'utf8')).options;
+  assert.equal(saved.colors.ground, '#0F3B40', 'resolved colours are saved for a resume');
+  console.log('ok  a picked palette sets the brief\'s colours');
 } finally {
   server.close();
   if (!keep) fs.rmSync(jobs, { recursive: true, force: true });

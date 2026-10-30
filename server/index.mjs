@@ -12,6 +12,7 @@ import { OAuth2Client } from 'google-auth-library';
 // Import harness modules (read-only consumption; no harness files are modified)
 import { runJob } from '../harness/src/orchestrator.js';
 import { runFilm } from '../harness/src/film.js';
+import { PALETTES, paletteById } from '../harness/src/look.js';
 import {
   config,
   providerStatus,
@@ -527,6 +528,8 @@ function formatLogLine(ev) {
       return `Repair ${ev.step}: ${(ev.errors || []).join(' | ').slice(0, 300)}`;
     case 'plan':
       return `Plan ready: ${ev.plan?.scenes?.length || 0} scenes, ${ev.usage?.calls || 0} calls`;
+    case 'palette':
+      return `Palette from the ${ev.source}: ${Object.entries(ev.colors || {}).map(([k, v]) => `${k} ${v}`).join(', ')}`;
     case 'story':
       return ev.skipped
         ? `Story: skipped (${ev.skipped})`
@@ -690,6 +693,7 @@ function createHarnessEventHandler(job) {
         const s = {
           understand: ['designing', 'Reading the brief: copy, timing, look...'],
           story: ['designing', 'Writing three storylines and picking one...'],
+          palette: ['designing', 'Building the colour palette...'],
           shortlist: ['planning', 'Shortlisting registry blocks for each beat...'],
           plan: ['planning', 'Planning scenes, theme & SPEC...'],
           assemble: ['building', 'Assembling project: theme, fonts, blocks, timeline...'],
@@ -1190,6 +1194,11 @@ const server = http.createServer(async (req, res) => {
         providers: statusList,
         catalog,
       });
+    }
+
+    // Named colour palettes for the app's picker (send its id as "palette" with a prompt).
+    if (pathname === '/api/palettes' && method === 'GET') {
+      return sendJson(req, res, 200, { success: true, palettes: PALETTES });
     }
 
     if (pathname === '/api/themes' && method === 'GET') {
@@ -1711,13 +1720,32 @@ const server = http.createServer(async (req, res) => {
         provider = 'azure';
       }
 
+      // Colours: a named palette, a colour reference image (https URL or data: URL, <= 8 MB, its
+      // palette is extracted in the job sandbox), or exact roles {ground, ink, accent, accent2?}.
+      const HEX = /^#[0-9a-f]{6}$/i;
+      if (body.palette != null && !paletteById(body.palette)) {
+        return sendError(req, res, 400, `Unknown palette "${body.palette}". GET /api/palettes lists them.`, 'BAD_PALETTE');
+      }
+      if (body.colorRef != null && !(typeof body.colorRef === 'string' && /^(https:\/\/|data:image\/[a-z0-9.+-]+;base64,)/i.test(body.colorRef))) {
+        return sendError(req, res, 400, 'Field "colorRef" must be an https image URL or a data:image/...;base64 URL.', 'BAD_COLOR_REF');
+      }
+      if (body.colors != null && !(body.colors && ['ground', 'ink', 'accent'].every((k) => HEX.test(body.colors[k])) && (body.colors.accent2 == null || HEX.test(body.colors.accent2)))) {
+        return sendError(req, res, 400, 'Field "colors" needs ground, ink and accent (and optionally accent2) as #RRGGBB.', 'BAD_COLORS');
+      }
+      const look = {
+        ...(body.colors ? { colors: body.colors } : {}),
+        ...(body.colorRef ? { colorRef: body.colorRef } : {}),
+        ...(body.palette ? { palette: body.palette } : {}),
+      };
+
       const options = {
         aspect: ratio,
         duration: durationS,
         provider,
         model,
         effort,
-        ...(inheritedTheme ? { theme: inheritedTheme } : {}),
+        ...(inheritedTheme && !Object.keys(look).length ? { theme: inheritedTheme } : {}),
+        ...look,
       };
 
       const job = {
@@ -1734,6 +1762,10 @@ const server = http.createServer(async (req, res) => {
             ? `Queued behind ${activeJobCount} active render...`
             : `Initializing HyperFrames with ${provider}/${model} (${effort})...`,
         theme: inheritedTheme || null,
+        palette: body.palette || null,
+        colors: body.colors || null,
+        // An embedded image is not kept in the job record; a retry resumes from the colours it gave.
+        colorRef: typeof body.colorRef === 'string' && body.colorRef.startsWith('https://') ? body.colorRef : null,
         title: prompt.slice(0, 56),
         prompt,
         ratio,
@@ -1807,6 +1839,9 @@ const server = http.createServer(async (req, res) => {
           model: job.model,
           effort: job.effort,
           ...(job.theme && job.theme !== 'custom' ? { theme: job.theme } : {}),
+          ...(job.colors ? { colors: job.colors } : {}),
+          ...(job.colorRef ? { colorRef: job.colorRef } : {}),
+          ...(job.palette ? { palette: job.palette } : {}),
         },
       });
 

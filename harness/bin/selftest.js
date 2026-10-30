@@ -264,6 +264,23 @@ await step('palette: full colour world from the theme; given colours kept; block
   assert.deepEqual(shaderProps(bundle, 'Aurora'), [['colorA', '#a533f8'], ['colorB', '#22ee88']]);
 });
 
+await step('look: named palettes read; a colour reference image gives ground, ink and accents', async () => {
+  const { PALETTES, clusterColours, rolesFromSwatches } = await import('../src/look.js');
+  const { contrast } = await import('../src/build/palette.js');
+  for (const p of PALETTES) {
+    const c = p.colors;
+    assert.ok(contrast(c.ink, c.ground) >= 4.5, `${p.id}: ink`);
+    assert.ok(contrast(c.accent, c.ground) >= 3 && contrast(c.accent2, c.ground) >= 3, `${p.id}: accents`);
+  }
+  // 60% green ground, 20% cream, 10% orange, 10% teal.
+  const px = [];
+  const put = (rgb, n) => { for (let i = 0; i < n; i++) px.push(...rgb); };
+  put([0x1f, 0x3d, 0x2b], 1380); put([0xf2, 0xe8, 0xd5], 460); put([0xe8, 0x76, 0x2c], 230); put([0x2b, 0xa6, 0xa0], 234);
+  const sw = clusterColours(Buffer.from(px));
+  assert.equal(sw[0].hex, '#1F3D2B');
+  assert.deepEqual(rolesFromSwatches(sw), { ground: '#1F3D2B', ink: '#F2E8D5', accent: '#E8762C', accent2: '#2BA6A0' });
+});
+
 await step('access rules', () => {
   assert.equal(canRead('builder', 'hyperframes-cli', 'references/cloud.md'), false);
   assert.equal(canRead('planner', 'hyperframes', 'assets/frame-presets/coral/FRAME.md'), true);

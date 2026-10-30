@@ -9,7 +9,7 @@ seeking a paused GSAP timeline frame by frame), plus the HTTP API the web fronte
 | Path | What it is |
 | --- | --- |
 | `harness/` | The agent harness and the `motion` CLI (Node ≥ 22.13, pins `hyperframes` 0.8.211, calls every model through the OpenAI SDK). |
-| `server/` | REST API (`index.mjs`): auth (password + Google OAuth), jobs, brand kits, assets. Runs `runJob` in-process. Its store is `server/data/db.json`, created at start and not committed. |
+| `server/` | REST API (`index.mjs`): auth (password + Google OAuth), jobs, brand kits, assets. Runs `runFilm` in-process. Its store is `server/data/db.json`, created at start and not committed. |
 | `.agents/skills/` | The HyperFrames skills (`hyperframes`, `-cli`, `-registry`, `media-use`, …) installed from `heygen-com/hyperframes`, pinned in `skills-lock.json`. The agents read these as their docs. |
 | `.claude/skills` | Symlink to `.agents/skills`, so Claude Code sessions in this repo load the same skills. |
 | `docs/build-agent-plan.md` | Design of the token-lean build pipeline (`motion build`). |
@@ -56,6 +56,13 @@ The build's scene writer (`harness/src/build/scenes.js`) gets the contract plus 
 `look.md#video-facts`. Its system prompt is identical for every scene so providers can cache it.
 Planning takes a preset only when the request or the app names one, and rejects the fonts generated
 design defaults to (Inter, Space Grotesk, Instrument Serif, Geist, JetBrains Mono) unless asked for.
+
+Colour (`harness/src/build/palette.js`, `harness/src/look.js`): the film's colours come from the
+request, a named palette (`palette`, see `GET /api/palettes` or `motion palettes`), a colour reference
+image (`colorRef`: an https image URL or a data: URL; its palette is extracted in the job sandbox), or
+exact roles (`colors`: ground, ink, accent, accent2). Code writes them into the brief, then builds the
+full palette (surface, muted, line, accent-soft, a second accent) and applies it to scenes, registry
+blocks' colour variables and shader blocks (`data-shader-props`). Given colours are never altered.
 
 The contract the generated code must meet lives in `.agents/skills/hyperframes/SKILL.md`: every timed
 element is a `.clip` with `data-start`/`data-duration`; each composition registers one paused timeline

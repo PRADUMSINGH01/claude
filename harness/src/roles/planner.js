@@ -5,7 +5,7 @@ import { fence, rolePrompt } from './common.js';
 
 const BODY = `## How to plan
 1. Read the request. Classify the film (explainer, launch, data, music, vertical, 3D, character, title card). Read the matching types/ file's key section if there is one.
-2. Pick the theme: a preset from list_themes when one suits the subject or the request names one; otherwise a custom theme with exact hex colours and named fonts. Never leave colours or fonts as adjectives.
+2. Pick the theme: a preset from list_themes only when the request names one (presets are slide-deck looks, never the fallback for a film: look.md#presets). Otherwise a custom theme with exact hex colours and named fonts, taken from the brand, a reference, or the subject's own world (look.md#the-look-line); Inter, Space Grotesk, Instrument Serif, Geist and JetBrains Mono only when the brand uses them. Never leave colours or fonts as adjectives.
 3. Beat by beat, search the registry (registry_search) for a block that IS the scene, or components that make it. Search with what the beat should do or look like, in 2–4 words ("aurora background", "bar chart race", "lower third"). Use only names the search returned. Then registry_inspect your candidates: a scene with copy needs an item with text variables; an item with image variables needs images you actually have. The harness rejects plans that break this.
 4. Write SPEC.md content following the template already loaded below (GOAL, OUTPUT, TIME, LOOK, OBJECTS, MOTION, SHOTS, BANNED, QA), with numbers where you would write adjectives.
 5. Data and facts: plan only charts and counters the request's own figures can fill. If a block needs data you were not given (a ranking, a time series), choose a form that shows only the given facts.

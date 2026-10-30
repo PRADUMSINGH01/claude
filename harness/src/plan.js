@@ -10,6 +10,9 @@ import { Workspace } from './workspace.js';
 
 // ---- 1. Understand -----------------------------------------------------------
 
+// Where generated design lands when nothing is decided (hyperframes references/look.md#the-look-line).
+export const GENERATED_FONTS = ['Inter', 'Space Grotesk', 'Instrument Serif', 'Geist', 'JetBrains Mono'];
+
 const BRIEF_SHAPE = `{
   "title": "short name",
   "goal": "what the viewer should feel or remember, one sentence",
@@ -36,6 +39,8 @@ Rules:
 - transitions: one per seam between beats when the request asks for transitions (else []). "at" is exactly the seam (a beat's end). kind "cover" = an overlay that covers the whole frame at its midpoint and hides the cut (colour flood, block/slice wipe, iris); kind "handoff" = the outgoing beat leaves and the next arrives with matching motion (whip, blur swap, push). Vary the styles; duration 0.3–1.2 s. Plain crossfades only if asked.
 - overlays: only text the request keeps on screen WHILE other beats play (e.g. "keep the logo in the corner", "the source stays at the bottom", "the hook stays at the top"). Give it its time range and position. Text shown in sequence ("then…") is a beat, not an overlay. Usually overlays is [].
 - Colours: put EVERY colour the request gives into look.colors, hex exactly as written: ground, ink and accent for the main roles, then one named key per extra colour (e.g. "coral": "#FF5A5F"). If it names a theme preset, set look.preset and leave colors empty. Fonts as named.
+- look.preset only when the request (or the app settings) names a preset: presets are slide-deck looks, never the fallback for a film. Otherwise leave it null and fill look.colors and look.fonts.
+- When the request gives no colours or fonts, take them from the subject's own world (its era, its materials, where it would be shown), never from habit. Avoid the defaults generated video lands on unless the request asks for them: ${GENERATED_FONTS.join(', ')} as fonts; a near-black or navy void as the ground; purple or blue gradients; a cream-paper ground with a serif display. Fonts are real Google Fonts families.
 - Defaults when silent: 1920x1080, 30 fps, 15 s, audio "none". Record every default you applied in assumptions.
 - background.wanted is true only when the request asks for a visual background layer (a shader, gradient, aurora, texture, pattern, footage) running under the beats. A background colour ("dark background", "white space") is look.colors.ground, not a layer.`;
 
@@ -46,7 +51,7 @@ export const readFloor = (copy) => {
   return words ? Math.max(2, 1 + 0.3 * words) : 0;
 };
 
-export function checkBrief(brief, prompt) {
+export function checkBrief(brief, prompt, options = {}) {
   const errs = [];
   const holders = [...(brief.beats ?? []), ...(brief.overlays ?? [])];
   const norm = (s) => String(s).toLowerCase().replace(/\s+/g, ' ').trim();
@@ -97,6 +102,10 @@ export function checkBrief(brief, prompt) {
   const missingHex = [...new Set((String(prompt).match(/#(?:[0-9a-f]{6}|[0-9a-f]{3})(?![0-9a-f])/gi) ?? []).map((h) => h.toUpperCase()))].filter((h) => !briefHex.has(h));
   if (missingHex.length && !brief.look?.preset) errs.push(`colours from the request are missing from look.colors: ${missingHex.join(', ')}; add each under its own name`);
   if (brief.look?.preset && !listThemes().some((x) => x.name === brief.look.preset)) errs.push(`unknown preset "${brief.look.preset}"`);
+  // Presets and the generated-default fonts only when asked for (code check, not a prompt rule).
+  const asked = (name) => new RegExp(`\\b${String(name).replace(/[-\s]+/g, '[-\\s]?')}\\b`, 'i').test(`${prompt} ${options.theme ?? ''}`);
+  if (brief.look?.preset && !asked(brief.look.preset)) errs.push(`look.preset "${brief.look.preset}" was not asked for: presets are slide-deck looks; set look.preset null and give colours and fonts from the subject`);
+  for (const f of brief.look?.fonts ?? []) if (GENERATED_FONTS.some((g) => g.toLowerCase() === String(f).toLowerCase()) && !asked(f)) errs.push(`font "${f}" is a generated-video default the request did not ask for; pick a family from the subject's world`);
   for (const b of brief.beats ?? []) {
     for (const c of b.copy ?? []) if (INSTRUCTION_WORDS.test(c)) errs.push(`beat ${b.id} copy "${c}" reads like an instruction, not on-screen text; put only the words the viewer sees`);
     const floor = readFloor(b.copy ?? []);
@@ -457,7 +466,7 @@ export async function runPlan({ prompt, options = {}, onEvent = () => {}, jobsDi
   onEvent({ type: 'job_start', job: ws.id, dir: ws.dir, resume: Boolean(dir) });
   const askP = (system, user) => ask(provider, system, user, usage, { signal });
   const request = `${prompt}${settingsText(options)}`;
-  const briefProblems = (b) => (Array.isArray(b?.beats) ? [...checkBrief(b, prompt), ...checkSettings(b, options)] : ['reply was not a brief object with beats[] (cut off or invalid JSON)']);
+  const briefProblems = (b) => (Array.isArray(b?.beats) ? [...checkBrief(b, prompt, options), ...checkSettings(b, options)] : ['reply was not a brief object with beats[] (cut off or invalid JSON)']);
 
   // 1. Understand
   onEvent({ type: 'step', step: 'understand', provider: `${provider.name}/${provider.model}` });

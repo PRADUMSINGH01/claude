@@ -69,7 +69,7 @@ const server = http.createServer((req, res) => {
     }
     if (system.startsWith('You write ONE HyperFrames scene file')) {
       calls.scene++;
-      const id = /data-composition-id="([a-z0-9-]+)"/.exec(system)?.[1] ?? 'x';
+      const id = /data-composition-id="([a-z0-9-]+)"/.exec(msgs[1].content)?.[1] ?? 'x';
       const copy = JSON.parse(/<scene>\n([\s\S]*?)\n<\/scene>/.exec(msgs[1].content)?.[1] ?? '{"scene":{"copy":[]}}').scene.copy ?? [];
       const dur = brief.beats.find((b) => b.id === id) ? 3 : 1;
       const html = `<template>

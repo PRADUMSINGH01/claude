@@ -27,7 +27,7 @@ const server = http.createServer((req, res) => {
   req.on('data', (d) => (body += d));
   req.on('end', () => {
     const msgs = JSON.parse(body).messages;
-    const id = /data-composition-id="([a-z0-9-]+)"/.exec(msgs[0].content)?.[1] ?? 'x';
+    const id = /data-composition-id="([a-z0-9-]+)"/.exec(msgs[1].content)?.[1] ?? 'x';
     const copy = JSON.parse(/<scene>\n([\s\S]*?)\n<\/scene>/.exec(msgs[1].content)?.[1] ?? '{"scene":{"copy":[]}}').scene.copy ?? [];
     const n = (seen.get(id) ?? 0) + 1;
     seen.set(id, n);

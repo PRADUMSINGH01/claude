@@ -45,6 +45,12 @@ and the model writing only hand-built scenes, one call each, verified per scene 
 Agents see only a map of file names and summaries and read the rest one section at a time within a
 per-role character budget (`SKILL_READ_CHARS`, `*_SKILL_BUDGET`).
 
+The build's scene writer (`harness/src/build/scenes.js`) gets the contract plus the design sections:
+`motion.md#motion-craft`, `spec.md#composition-numbers`, `spec.md#banned-by-default` and
+`look.md#video-facts`. Its system prompt is identical for every scene so providers can cache it.
+Planning takes a preset only when the request or the app names one, and rejects the fonts generated
+design defaults to (Inter, Space Grotesk, Instrument Serif, Geist, JetBrains Mono) unless asked for.
+
 The contract the generated code must meet lives in `.agents/skills/hyperframes/SKILL.md`: every timed
 element is a `.clip` with `data-start`/`data-duration`; each composition registers one paused timeline
 in `window.__timelines[id]`; no wall-clock time, unseeded randomness, network or `repeat: -1`; scene

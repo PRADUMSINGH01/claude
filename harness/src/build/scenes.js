@@ -65,6 +65,10 @@ ${designText(lib)}
   return text;
 }
 
+function componentSource(item) {
+  return item.source.replace(/data-composition-variables='[^']*'/, 'data-composition-variables=\'(see the variables listed in the comment)\'');
+}
+
 export function scenePacket(scene, ctx) {
   const { format, roles, lib, items } = ctx;
   const [bw, bh] = BOX_SIZE[scene.layer === 'overlay' ? scene.position ?? 'bottom' : 'full'];

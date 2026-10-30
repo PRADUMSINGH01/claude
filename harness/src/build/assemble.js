@@ -9,6 +9,7 @@ import { hf } from '../hf.js';
 import { applyTheme, registryAdd } from '../tools/registry-tools.js';
 import { prepareFonts } from './fonts.js';
 import { themeRoles, tokenCss } from './tokens.js';
+import { roleColour, shaderColours } from './palette.js';
 import { fallbackScene } from './scene-files.js';
 
 // GSAP ships inside the project (the version the scaffold pins), so check, snapshot and render
@@ -52,6 +53,38 @@ export function extendItem(src, from, to) {
     return tag.replace(/\bdata-duration="[\d.]+"/, `data-duration="${+(to - start).toFixed(3)}"`);
   });
   return out;
+}
+
+// Shader blocks (the bundled shaders library) draw with colours from their canvas's data-shader-props,
+// defaulting to the library's own (aurora: violet, green, blue). Read the shader's colour props from
+// the bundle and set them from the palette; the block's hard-coded black ground becomes the theme's.
+export function shaderProps(bundle, shader) {
+  const at = bundle.indexOf(`${shader}",role:`);
+  if (at < 0) return [];
+  const next = bundle.indexOf(',role:"', at + shader.length + 8);
+  const def = bundle.slice(at, next > at ? next : at + 8000);
+  return [...def.matchAll(/([A-Za-z_]\w*):\{default:"(#[0-9a-fA-F]{3,8})"/g)].map((m) => [m[1], m[2]]);
+}
+
+function themeShaderItem(ws, item, roles) {
+  const abs = path.join(ws.projectDir, item.file);
+  let src = fs.readFileSync(abs, 'utf8');
+  const shader = /<canvas[^>]*\bdata-shader="([^"]+)"/.exec(src)?.[1];
+  const lib = path.join(path.dirname(abs), 'lib', 'shaders.iife.js');
+  if (!shader || !fs.existsSync(lib)) return null;
+  const props = shaderProps(fs.readFileSync(lib, 'utf8'), shader);
+  if (!props.length) return null;
+  const colours = shaderColours(props, roles);
+  src = src.replace(/(<canvas[^>]*\bdata-shader="[^"]+")([^>]*)>/, (m, head, rest) => {
+    let given = {};
+    const old = /\sdata-shader-props='([^']*)'/.exec(rest);
+    try { given = old ? JSON.parse(old[1]) : {}; } catch { /* replace it */ }
+    const merged = { ...given, ...colours };
+    return `${head}${rest.replace(/\sdata-shader-props='[^']*'/, '')} data-shader-props='${JSON.stringify(merged)}'>`;
+  });
+  src = src.replace(/background:\s*#000(000)?\b/gi, 'background: var(--bg)');
+  fs.writeFileSync(abs, src);
+  return { shader, colours };
 }
 
 function readItem(ws, name, add) {
@@ -126,6 +159,7 @@ export async function assemble(ws, plan, brief, { emit = () => {} } = {}) {
   roles.display = fonts.map[roles.display] ?? roles.display;
   roles.body = fonts.map[roles.body] ?? roles.body;
   for (const f of fonts.report) if (/NOT FOUND/.test(f.how)) warnings.push(`font ${f.family}: ${f.how}`);
+  for (const w of roles.paletteWarnings ?? []) warnings.push(`palette: ${w}`);
   emit('assemble', { step: 'theme', roles, fonts: fonts.report });
 
   // Install every registry item once.
@@ -135,7 +169,8 @@ export async function assemble(ws, plan, brief, { emit = () => {} } = {}) {
     const add = await registryAdd(ws, name);
     if (!add.ok) { warnings.push(`install ${name} failed: ${add.text.slice(0, 200)}`); continue; }
     items[name] = readItem(ws, name, add);
-    emit('assemble', { step: 'install', name, kind: items[name].kind, mountable: items[name].mountable });
+    const themed = items[name].file ? themeShaderItem(ws, items[name], roles) : null;
+    emit('assemble', { step: 'install', name, kind: items[name].kind, mountable: items[name].mountable, shader: themed });
   }
 
   // How each scene is made.
@@ -187,6 +222,11 @@ export async function assemble(ws, plan, brief, { emit = () => {} } = {}) {
         fs.writeFileSync(abs, extendItem(fs.readFileSync(abs, 'utf8'), item.ownDuration, s.duration));
         warnings.push(`${s.id}: ${item.name} runs ${item.ownDuration}s on its own; extended to ${s.duration}s (it holds or loops past its authored end)`);
         item.ownDuration = s.duration;
+      }
+      // Colour variables the plan left unset take their role from the palette (by name, or the
+      // palette colour nearest the item's default), so no item keeps its demo palette.
+      for (const d of item.vars) {
+        if (d.type === 'color' && values[d.id] == null) values[d.id] = roleColour(d.id, d.default, roles);
       }
     }
     const file = mode === 'write' ? `compositions/${s.id}.html` : item.file;

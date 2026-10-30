@@ -42,7 +42,8 @@ The file must follow the contract below exactly:
 - No Date.now(), Math.random(), fetch, timers, or repeat: -1. Everything visible is a function of timeline time.
 - Ids unique and prefixed "<scene id>-".
 - Sizes relative to the box: #root has container-type: size, so use cqw/cqh/cqmin for type and spacing (the box size is in the task).
-- Colours and fonts only through the theme tokens: var(--bg) var(--fg) var(--accent) var(--accent-2) var(--font-display) var(--font-body). Never make text the ground colour.
+- Colours and fonts only through the theme tokens: var(--bg) var(--fg) var(--muted) var(--surface) var(--line) var(--accent) var(--accent-2) var(--accent-soft) var(--font-display) var(--font-body). No other colour values. Never make text the ground colour.
+- Colour roles: var(--fg) for words that must be read, var(--muted) for secondary lines, var(--surface) for panels and cards, var(--line) for rules, axes and outlines, var(--accent-soft) for atmosphere and large fields. var(--accent) only on the one focus of the frame (a word, the number, the payoff); var(--accent-2) for a second series or a support shape, never competing with it. No gradients between accents.
 - On-screen text: exactly the scene's copy, verbatim. No other words.
 - Components: when one is listed, adapt its markup, CSS and script into this file as its comment says (set its text and options in code from the scene's values). Don't load external files.
 

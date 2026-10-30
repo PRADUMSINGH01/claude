@@ -244,6 +244,26 @@ await step('scene writer: a missing or misnamed timeline registration is fixed i
   assert.equal(ensureRegistered('<template><script>1</script></template>', 'a'), '<template><script>1</script></template>');
 });
 
+await step('palette: full colour world from the theme; given colours kept; blocks and shaders take it', async () => {
+  const { buildPalette, roleColour, shaderColours, oklch, contrast } = await import('../src/build/palette.js');
+  const { shaderProps } = await import('../src/build/assemble.js');
+  const p = buildPalette({ ground: '#07101F', ink: '#F0EBDE', accent: '#5560E5' });
+  assert.equal(p.accent, '#5560E5');
+  assert.equal(p.ink, '#F0EBDE');
+  assert.notEqual(p.accent2, p.accent, 'a missing second accent is derived, not a copy');
+  const h = oklch(p.accent2)[2];
+  assert.ok(h < 285 || h > 330, `second accent hue ${h} is out of the violet band`);
+  assert.ok(contrast(p.muted, p.ground) >= 4.5 && contrast(p.accent2, p.ground) >= 3);
+  assert.match(buildPalette({ ground: '#FFFFFF', ink: '#BBBBBB', accent: '#FFE600' }).warnings.join(), /1\.9:1.*4\.5:1/);
+  assert.equal(roleColour('bgColor', '#000000', p), p.ground);
+  assert.equal(roleColour('titleColor', '#ffffff', p), p.ink);
+  assert.ok([p.accent, p.accent2].includes(roleColour('c1', '#22ee88', p)), 'a saturated default maps to an accent');
+  assert.deepEqual(Object.keys(shaderColours([['colorA', '#a533f8'], ['colorB', '#22ee88'], ['colorBorder', '#000000']], p)), ['colorA', 'colorB', 'colorBorder']);
+  assert.equal(shaderColours([['colorBorder', '#000000']], p).colorBorder, p.ground);
+  const bundle = 'x,Aurora",role:"generator",props:{colorA:{default:"#a533f8",x:1},speed:{default:5},colorB:{default:"#22ee88"}},y,role:"other",colorZ:{default:"#ffffff"}';
+  assert.deepEqual(shaderProps(bundle, 'Aurora'), [['colorA', '#a533f8'], ['colorB', '#22ee88']]);
+});
+
 await step('access rules', () => {
   assert.equal(canRead('builder', 'hyperframes-cli', 'references/cloud.md'), false);
   assert.equal(canRead('planner', 'hyperframes', 'assets/frame-presets/coral/FRAME.md'), true);

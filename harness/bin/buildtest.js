@@ -12,7 +12,8 @@ const [src] = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 const renderToo = process.argv.includes('--render');
 if (!src) throw new Error('usage: node bin/buildtest.js <plan-job-dir> [--render]');
 
-const jobs = fs.mkdtempSync(path.join(os.tmpdir(), 'motion-buildtest-'));
+const jobs = process.env.BUILDTEST_JOBS ? fs.mkdtempSync(path.join(process.env.BUILDTEST_JOBS, 'buildtest-')) : fs.mkdtempSync(path.join(os.tmpdir(), 'motion-buildtest-'));
+fs.chmodSync(jobs, 0o755);
 process.env.JOBS_DIR = jobs;
 const { config } = await import('../src/config.js');
 const { Workspace } = await import('../src/workspace.js');

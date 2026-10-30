@@ -3,6 +3,8 @@
 // --accent-2, --brand and --font-display (and the presets' caption skins read --cap-*). We set all of
 // them from the theme so mounted blocks and components pick the theme up without edits.
 
+import { buildPalette } from './palette.js';
+
 const hexToRgb = (hex) => {
   const m = /^#?([0-9a-f]{6}|[0-9a-f]{3})(?![0-9a-f])/i.exec(String(hex).trim());
   if (!m) return null;
@@ -51,11 +53,18 @@ export function themeRoles(theme) {
   const accent2 = Object.values(colors).filter((c) => ![ground, ink, accent].includes(c)).sort((a, b) => saturation(b) - saturation(a))[0] ?? accent;
 
   const fonts = theme.fonts ?? [];
+  // The full colour world (palette.js): surface, muted, line, accent-soft, and a real second accent.
+  const palette = buildPalette({ ground: ground ?? '#0B0B0B', ink: ink ?? '#FFFFFF', accent: accent ?? '#FFFFFF', accent2: accent2 === accent ? null : accent2 });
   return {
-    ground: ground ?? '#0B0B0B',
-    ink: ink ?? '#FFFFFF',
-    accent: accent ?? '#FFFFFF',
-    accent2,
+    ground: palette.ground,
+    ink: palette.ink,
+    accent: palette.accent,
+    accent2: palette.accent2,
+    surface: palette.surface,
+    muted: palette.muted,
+    line: palette.line,
+    accentSoft: palette.accentSoft,
+    paletteWarnings: palette.warnings,
     display: theme.roles?.display ?? fonts[0] ?? 'Inter',
     body: theme.roles?.body ?? fonts[1] ?? fonts[0] ?? 'Inter',
     dark: (luminance(ground ?? '#000') ?? 0) < 0.35,
@@ -75,6 +84,10 @@ export function tokenCss(roles, colors = {}) {
     `  --accent: ${roles.accent};`,
     `  --brand: ${roles.accent};`,
     `  --accent-2: ${roles.accent2};`,
+    `  --surface: ${roles.surface ?? roles.ground};`,
+    `  --muted: ${roles.muted ?? roles.ink};`,
+    `  --line: ${roles.line ?? roles.ink};`,
+    `  --accent-soft: ${roles.accentSoft ?? roles.accent};`,
     `  --font-display: ${fontStack(roles.display, 'system-ui, sans-serif')};`,
     `  --font-body: ${fontStack(roles.body, 'system-ui, sans-serif')};`,
     `  --cap-ink: ${roles.ink};`,

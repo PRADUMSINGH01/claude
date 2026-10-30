@@ -3,5 +3,5 @@
 .git
 jobs
 **/node_modules
-agent
+server/data
 *.log

@@ -17,7 +17,54 @@ function contractText(lib) {
   ].filter(Boolean).join('\n\n');
 }
 
-// Comment header + code of a component, without the demo copy it ships with.
+// How a scene should look and move, not only what makes it valid: motion craft, composition numbers,
+// the defaults that make a film read as generated, and what survives compression.
+function designText(lib) {
+  return [
+    readSection(lib, 'hyperframes', 'references/motion.md', 'motion-craft'),
+    readSection(lib, 'hyperframes', 'references/spec.md', 'composition-numbers'),
+    readSection(lib, 'hyperframes', 'references/spec.md', 'banned-by-default'),
+    readSection(lib, 'hyperframes', 'references/look.md', 'video-facts'),
+  ].filter(Boolean).join('\n\n');
+}
+
+// The system prompt is the same for every scene (and every film), so providers that cache a repeated
+// prompt prefix reuse it; everything about this scene goes in the user message.
+const systemCache = new WeakMap();
+function sceneSystem(lib) {
+  if (systemCache.has(lib)) return systemCache.get(lib);
+  const text = `You write ONE HyperFrames scene file (a sub-composition). Reply with JSON only: {"html": "<the whole file>"}.
+
+The file must follow the contract below exactly:
+- Everything inside one <template>. Its root element is <div id="root" data-composition-id="<scene id>">. Style the root as #root (never by class) and give it position:absolute; inset:0.
+- One paused GSAP timeline, registered last: window.__timelines["<scene id>"] = tl. gsap is already loaded globally.
+- Every timed element has class="clip", data-start and data-duration in seconds relative to the scene start, inside the scene's duration. Animate children of a .clip (or its opacity), never display/visibility/autoAlpha. Use fromTo, never from.
+- No Date.now(), Math.random(), fetch, timers, or repeat: -1. Everything visible is a function of timeline time.
+- Ids unique and prefixed "<scene id>-".
+- Sizes relative to the box: #root has container-type: size, so use cqw/cqh/cqmin for type and spacing (the box size is in the task).
+- Colours and fonts only through the theme tokens: var(--bg) var(--fg) var(--accent) var(--accent-2) var(--font-display) var(--font-body). Never make text the ground colour.
+- On-screen text: exactly the scene's copy, verbatim. No other words.
+- Components: when one is listed, adapt its markup, CSS and script into this file as its comment says (set its text and options in code from the scene's values). Don't load external files.
+
+How it looks and moves (the design rules below, in numbers):
+- The scene's own build and motion win where they are specific; the rules below fill every gap.
+- Text that must be read: at least 2.6cqmin. A title is 4-9cqh, one or two lines; at most one word in var(--accent), the word that carries the meaning.
+- The hero fills at least 40% of the box's width or height. Keep content inside the central 90% of the box, text inside 80%.
+- One hero move; secondary moves travel 50-70% as far and start 0.1-0.2 s after it; everything else holds still. A landed title is dead still until it leaves.
+- Ease by role (expo.out or power4.out to arrive, power2.inOut to move, power3.in to leave), never one ease on everything. Pick one title entrance from the motion craft list; never fade-and-slide-up on every element.
+- Nothing from the BANNED list: no glow, particles, glass cards, corner labels, frame borders or three cards in a row unless the scene's build asks for them.
+
+<contract>
+${contractText(lib)}
+</contract>
+
+<design>
+${designText(lib)}
+</design>`;
+  systemCache.set(lib, text);
+  return text;
+}
+
 function componentSource(item) {
   return item.source.replace(/data-composition-variables='[^']*'/, 'data-composition-variables=\'(see the variables listed in the comment)\'');
 }
@@ -27,31 +74,12 @@ export function scenePacket(scene, ctx) {
   const [bw, bh] = BOX_SIZE[scene.layer === 'overlay' ? scene.position ?? 'bottom' : 'full'];
   const box = { width: Math.round(format.width * bw), height: Math.round(format.height * bh) };
   const comps = [...(scene.components ?? []), ...(scene.escalatedFrom ? [scene.escalatedFrom] : [])].map((n) => items[n]).filter(Boolean);
-  const system = `You write ONE HyperFrames scene file (a sub-composition). Reply with JSON only: {"html": "<the whole file>"}.
-
-The file must follow the contract below exactly:
-- Everything inside one <template>. Its root element is <div id="root" data-composition-id="${scene.id}">. Style the root as #root (never by class) and give it position:absolute; inset:0.
-- One paused GSAP timeline, registered last: window.__timelines["${scene.id}"] = tl. gsap is already loaded globally.
-- Every timed element has class="clip", data-start and data-duration in seconds relative to the scene start, inside 0–${scene.duration}s. Animate children of a .clip (or its opacity), never display/visibility/autoAlpha. Use fromTo, never from.
-- No Date.now(), Math.random(), fetch, timers, or repeat: -1. Everything visible is a function of timeline time.
-- Ids unique and prefixed "${scene.id}-".
-- Sizes relative to the box: #root has container-type: size, so use cqw/cqh/cqmin for type and spacing. The box is ${box.width}x${box.height}px.
-- Colours and fonts only through the theme tokens: var(--bg) var(--fg) var(--accent) var(--accent-2) var(--font-display) var(--font-body). The ground is ${roles.dark ? 'DARK' : 'LIGHT'}: type in var(--fg) reads; never make text the ground colour. Do not paint a background on #root${scene.layer === 'main' && ctx.hasBackground ? ' (a background layer runs under this scene)' : ' unless the scene asks for one'}.
-- On-screen text: exactly the scene's copy, verbatim. No other words.${scene.layer === 'transition' ? `
-- THIS SCENE IS A TRANSITION over the cut at ${(scene.duration / 2).toFixed(2)}s (its midpoint). It has no text. It must COVER THE WHOLE FRAME with opaque theme colours at exactly that midpoint (the outgoing beat must not show), and be fully clear again at its start and end (#root transparent, shapes off-frame). Build it from bold shapes: colour blocks, slices, an iris, a flood. Ease in hard, ease out hard; the cover moment is short. Follow the style in the scene's build.` : ''}
-- Components: when one is listed, adapt its markup, CSS and script into this file as its comment says (set its text and options in code from the scene's values). Don't load external files.
-
-<contract>
-${contractText(lib)}
-</contract>${scene.layer === 'transition' ? `
-
-<transitions>
-${transitionText(lib)}
-</transitions>` : ''}
-
-<skeleton>
-${skeleton(scene.id)}
-</skeleton>`;
+  const rules = [
+    `- Root: <div id="root" data-composition-id="${scene.id}">; register window.__timelines["${scene.id}"] = tl; ids prefixed "${scene.id}-"; every clip inside 0-${scene.duration}s.`,
+    `- The box is ${box.width}x${box.height}px.`,
+    `- The ground is ${roles.dark ? 'DARK' : 'LIGHT'}: type in var(--fg) reads. Do not paint a background on #root${scene.layer === 'main' && ctx.hasBackground ? ' (a background layer runs under this scene)' : ' unless the scene asks for one'}.`,
+    scene.layer === 'transition' ? `- THIS SCENE IS A TRANSITION over the cut at ${(scene.duration / 2).toFixed(2)}s (its midpoint). It has no text. It must COVER THE WHOLE FRAME with opaque theme colours at exactly that midpoint (the outgoing beat must not show), and be fully clear again at its start and end (#root transparent, shapes off-frame). Build it from bold shapes: colour blocks, slices, an iris, a flood. Ease in hard, ease out hard; the cover moment is short. Follow the style in the scene's build.` : null,
+  ].filter(Boolean);
 
   const task = {
     scene: { id: scene.id, layer: scene.layer, duration: scene.duration, position: scene.position ?? null, copy: scene.text, build: scene.build, motion: scene.motion, values: scene.vars ?? {} },
@@ -60,10 +88,13 @@ ${skeleton(scene.id)}
     why_written: scene.escalatedFrom ? `The mounted ${scene.escalatedFrom} failed review: ${scene.escalationReason}. Rebuild the scene yourself, adapting its source.` : undefined,
   };
   const user = [
+    `<this-scene>\n${rules.join('\n')}\n</this-scene>`,
+    scene.layer === 'transition' ? `<transitions>\n${transitionText(lib)}\n</transitions>` : null,
+    `<skeleton>\n${skeleton(scene.id)}\n</skeleton>`,
     `<scene>\n${JSON.stringify(task, null, 1)}\n</scene>`,
     ...comps.map((c) => `<component name="${c.name}">\n${componentSource(c)}\n</component>`),
-  ].join('\n\n');
-  return { system, user };
+  ].filter(Boolean).join('\n\n');
+  return { system: sceneSystem(lib), user };
 }
 
 // Code checks that need no browser: catch the common contract breaks before running check.

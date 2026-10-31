@@ -1,5 +1,6 @@
-// Planning, on its own and cheap: understand → shortlist (code) → plan → rate.
-// No tool loops and nothing re-sent: two short model calls (plus one repair if the plan is invalid).
+// Planning, on its own and cheap: understand → story (films over ~15 s) → shortlist (code) → plan → rate.
+// No tool loops and nothing re-sent: a few short model calls (plus one repair per step if invalid).
+import fs from 'node:fs';
 import { config, providerForRole } from './config.js';
 import { chat } from './llm.js';
 import { SkillLibrary } from './skills/library.js';
@@ -10,10 +11,13 @@ import { Workspace } from './workspace.js';
 
 // ---- 1. Understand -----------------------------------------------------------
 
+// Where generated design lands when nothing is decided (hyperframes references/look.md#the-look-line).
+export const GENERATED_FONTS = ['Inter', 'Space Grotesk', 'Instrument Serif', 'Geist', 'JetBrains Mono'];
+
 const BRIEF_SHAPE = `{
   "title": "short name",
   "goal": "what the viewer should feel or remember, one sentence",
-  "kind": "title | explainer | launch | data | music | vertical | 3d | other",
+  "kind": "title | explainer | launch | data | music | vertical | 3d | character | other",
   "format": { "width": 1920, "height": 1080, "fps": 30, "duration": <seconds> },
   "audio": "none | sfx | music",
   "look": { "preset": "<preset name or null>", "colors": { "ground": "#hex", "ink": "#hex", "accent": "#hex", "<more names, e.g. coral, lime>": "#hex" }, "fonts": ["Family"], "mood": "3-6 words" },
@@ -36,6 +40,8 @@ Rules:
 - transitions: one per seam between beats when the request asks for transitions (else []). "at" is exactly the seam (a beat's end). kind "cover" = an overlay that covers the whole frame at its midpoint and hides the cut (colour flood, block/slice wipe, iris); kind "handoff" = the outgoing beat leaves and the next arrives with matching motion (whip, blur swap, push). Vary the styles; duration 0.3–1.2 s. Plain crossfades only if asked.
 - overlays: only text the request keeps on screen WHILE other beats play (e.g. "keep the logo in the corner", "the source stays at the bottom", "the hook stays at the top"). Give it its time range and position. Text shown in sequence ("then…") is a beat, not an overlay. Usually overlays is [].
 - Colours: put EVERY colour the request gives into look.colors, hex exactly as written: ground, ink and accent for the main roles, then one named key per extra colour (e.g. "coral": "#FF5A5F"). If it names a theme preset, set look.preset and leave colors empty. Fonts as named.
+- look.preset only when the request (or the app settings) names a preset: presets are slide-deck looks, never the fallback for a film. Otherwise leave it null and fill look.colors and look.fonts.
+- When the request gives no colours or fonts, take them from the subject's own world (its era, its materials, where it would be shown), never from habit. Avoid the defaults generated video lands on unless the request asks for them: ${GENERATED_FONTS.join(', ')} as fonts; a near-black or navy void as the ground; purple or blue gradients; a cream-paper ground with a serif display. Fonts are real Google Fonts families.
 - Defaults when silent: 1920x1080, 30 fps, 15 s, audio "none". Record every default you applied in assumptions.
 - background.wanted is true only when the request asks for a visual background layer (a shader, gradient, aurora, texture, pattern, footage) running under the beats. A background colour ("dark background", "white space") is look.colors.ground, not a layer.`;
 
@@ -46,7 +52,7 @@ export const readFloor = (copy) => {
   return words ? Math.max(2, 1 + 0.3 * words) : 0;
 };
 
-export function checkBrief(brief, prompt) {
+export function checkBrief(brief, prompt, options = {}) {
   const errs = [];
   const holders = [...(brief.beats ?? []), ...(brief.overlays ?? [])];
   const norm = (s) => String(s).toLowerCase().replace(/\s+/g, ' ').trim();
@@ -97,6 +103,19 @@ export function checkBrief(brief, prompt) {
   const missingHex = [...new Set((String(prompt).match(/#(?:[0-9a-f]{6}|[0-9a-f]{3})(?![0-9a-f])/gi) ?? []).map((h) => h.toUpperCase()))].filter((h) => !briefHex.has(h));
   if (missingHex.length && !brief.look?.preset) errs.push(`colours from the request are missing from look.colors: ${missingHex.join(', ')}; add each under its own name`);
   if (brief.look?.preset && !listThemes().some((x) => x.name === brief.look.preset)) errs.push(`unknown preset "${brief.look.preset}"`);
+  // Real numbers only (story.md §1): every figure on screen appears in the request.
+  const digits = (t) => String(t).replace(/(\d),(\d)/g, '$1$2');
+  const said = digits(`${prompt} ${options.duration ?? ''}`);
+  for (const h of holders) {
+    for (const c of h.copy ?? []) {
+      const invented = (digits(c).match(/\d+(?:\.\d+)?/g) ?? []).filter((n) => !new RegExp(`(^|[^\\d.])${n.replace('.', '\\.')}(?![\\d]|\\.\\d)`).test(said));
+      if (invented.length) errs.push(`${h.id} copy "${c}" shows ${invented.join(', ')}, which the request never gives; use only the request's figures`);
+    }
+  }
+  // Presets and the generated-default fonts only when asked for (code check, not a prompt rule).
+  const asked = (name) => new RegExp(`\\b${String(name).replace(/[-\s]+/g, '[-\\s]?')}\\b`, 'i').test(`${prompt} ${options.theme ?? ''}`);
+  if (brief.look?.preset && !asked(brief.look.preset)) errs.push(`look.preset "${brief.look.preset}" was not asked for: presets are slide-deck looks; set look.preset null and give colours and fonts from the subject`);
+  for (const f of brief.look?.fonts ?? []) if (GENERATED_FONTS.some((g) => g.toLowerCase() === String(f).toLowerCase()) && !asked(f)) errs.push(`font "${f}" is a generated-video default the request did not ask for; pick a family from the subject's world`);
   for (const b of brief.beats ?? []) {
     for (const c of b.copy ?? []) if (INSTRUCTION_WORDS.test(c)) errs.push(`beat ${b.id} copy "${c}" reads like an instruction, not on-screen text; put only the words the viewer sees`);
     const floor = readFloor(b.copy ?? []);
@@ -106,6 +125,100 @@ export function checkBrief(brief, prompt) {
     errs.push('background.wanted is true but the request only names a background colour; set it in look.colors.ground and set background.wanted false');
   }
   return errs;
+}
+
+// ---- 1b. Story ------------------------------------------------------------------
+// hyperframes references/story.md: a film over ~15 s that tells something gets three storylines that
+// are three different films (device × form), one picked, and beats shaped by it. With no one to ask,
+// the recommendation is built and the other two are saved (STORYLINES.md) so a later turn can switch.
+
+const TYPE_FILES = { launch: 'launch', explainer: 'explainer', data: 'data', music: 'music', vertical: 'vertical', '3d': '3d', character: 'character' };
+// A request that already gives its beats, shots or timings is followed, not re-told.
+const SCRIPTED = /\b(beat|scene|shot)\s*\d|\b\d+(\.\d+)?\s*[-–]\s*\d+(\.\d+)?\s*s\b|storyboard|\bscript\s*:/i;
+
+export function storyApplies(brief, prompt) {
+  if (SCRIPTED.test(prompt)) return { applies: false, why: 'the request gives its own beats; following them' };
+  if ((brief.format?.duration ?? 0) < 15) return { applies: false, why: 'under 15 s: the request is the story' };
+  if (brief.kind === 'title') return { applies: false, why: 'a title card: one idea' };
+  return { applies: true };
+}
+
+function storyGuides(lib, brief) {
+  const whole = (rel) => {
+    const f = lib.file('hyperframes', rel);
+    return f ? fs.readFileSync(f.abs, 'utf8').trim() : '';
+  };
+  const types = [TYPE_FILES[brief.kind], brief.format?.height > brief.format?.width && brief.kind !== 'vertical' ? 'vertical' : null].filter(Boolean);
+  return { story: whole('references/story.md'), types: types.map((t) => whole(`references/types/${t}.md`)).filter(Boolean).join('\n\n') };
+}
+
+const STORY_SHAPE = `{
+  "one_thing": "what it is, in one line", "remember": "the one thing the viewer remembers, in their words",
+  "spine": "one viewer doing one real task, and the one piece of data that travels through it",
+  "storylines": [ { "name": "", "device": "", "form": "", "sees_feels": "two sentences", "first_two_seconds": "exactly what is on screen",
+    "beats": "hook → … → end, one line", "look": "ground, type, the one material, one line", "sound": "one line" } ],
+  "pick": 0, "reason": "one clause",
+  "brief": <the whole brief, rewritten to tell the picked storyline, same shape as the input brief>
+}`;
+
+function storySystem(guides) {
+  return `You are the story editor for a short film. Follow the story guide below. Reply with JSON only, in this shape:
+${STORY_SHAPE}
+Rules:
+- Exactly three storylines that are three different films: each its own world, device and form (from the guide's tables). Sketch more in your head, keep the three that differ most, one of them the bold one. Put your recommendation in "pick" (0, 1 or 2): the one a stranger would follow and remember.
+- The rewritten brief keeps format, audio, must and avoid exactly as given, and keeps every colour and font the request gave. Colours and fonts the request left open may come from the picked storyline's look.
+- Every line of copy from the input brief stays verbatim, in exactly one beat or overlay. Keep any timings the request gives.
+- You may add short on-screen lines (at most 6 words, no trailing period) where the storyline needs them (a hook, a claim, an end line). Added lines make no claims: no numbers, names, dates or facts the request does not give. List each in assumptions as "added copy: …".
+- Beats run back to back from 0 to format.duration, shaped by the picked storyline and the guide's beat shares scaled to the length. Each beat is readable (at least 2 s, and 1 s + 0.3 s a word of its copy) and something new happens every 2–4 s. Each intent says what the beat does visually in 2–5 words, from the storyline's device and form, for a registry search (never "title card" for every beat).
+- transitions: one per seam where the picked form carries the cut ("cover": colour flood, block/slice wipe, iris; "handoff": whip, blur swap, match cut, push), "at" exactly on the seam, duration 0.3–1.2 s, varied; at most a third of the seams are plain cuts (no entry). Keep the input brief's overlays.
+- Nothing from the guide's tells (§8) or the BANNED defaults: no three cards in a row, no logo alone on frame 0, no "Introducing" opener.
+
+<story-guide>
+${guides.story}
+</story-guide>${guides.types ? `
+
+<type-guide>
+${guides.types}
+</type-guide>` : ''}`;
+}
+
+export function storylinesMarkdown(story) {
+  const lines = (story.storylines ?? []).map((x, i) => [
+    `## ${i === story.pick ? '★ ' : ''}${i + 1}. ${x.name}${i === story.pick ? ' (built)' : ''}`,
+    `- device: ${x.device} · form: ${x.form}`,
+    `- ${x.sees_feels}`,
+    `- first two seconds: ${x.first_two_seconds}`,
+    `- beats: ${x.beats}`,
+    `- look: ${x.look}`,
+    `- sound: ${x.sound}`,
+  ].join('\n'));
+  return `# Storylines\n\nThe one thing: ${story.one_thing}\nRemember: ${story.remember}\nSpine: ${story.spine}\n\nBuilt: ${story.storylines?.[story.pick]?.name} (${story.reason})\n\n${lines.join('\n\n')}\n`;
+}
+
+// The story pass may reshape beats and fill an open look; it may not change what the request fixed.
+function storyProblems(story, brief, prompt, options) {
+  const b = story?.brief;
+  if (!Array.isArray(story?.storylines) || story.storylines.length !== 3) return ['give exactly three storylines'];
+  if (!Number.isInteger(story.pick) || !story.storylines[story.pick]) return ['pick must be 0, 1 or 2'];
+  if (!Array.isArray(b?.beats)) return ['brief must be the whole rewritten brief with beats[]'];
+  const errs = [...checkBrief(b, prompt, options), ...checkSettings(b, options)];
+  for (const k of ['width', 'height', 'fps', 'duration']) if (b.format?.[k] !== brief.format?.[k]) errs.push(`brief.format.${k} must stay ${brief.format?.[k]}`);
+  if (b.audio !== brief.audio) errs.push(`brief.audio must stay "${brief.audio}"`);
+  for (const [k, v] of Object.entries(brief.look?.colors ?? {})) if (b.look?.colors?.[k] !== v) errs.push(`brief.look.colors.${k} must stay ${v}`);
+  return errs;
+}
+
+async function storyPass(askP, lib, brief, request, prompt, options, onEvent) {
+  const system = storySystem(storyGuides(lib, brief));
+  const input = `${request}\n\n<brief>\n${JSON.stringify(brief, null, 1)}\n</brief>`;
+  let story = await askP(system, input);
+  let errs = storyProblems(story, brief, prompt, options);
+  if (errs.length) {
+    onEvent({ type: 'repair', step: 'story', errors: errs });
+    story = await askP(system, `${input}\n\nYour previous reply had these problems; fix them and reply with the whole JSON:\n- ${errs.join('\n- ')}\n\nPrevious reply:\n${JSON.stringify(story)}`);
+    errs = storyProblems(story, brief, prompt, options);
+  }
+  return { story, errs };
 }
 
 // ---- 2. Shortlist (code only) ------------------------------------------------
@@ -200,7 +313,7 @@ function planSystem(lib) {
 ${PLAN_SHAPE}
 Rules:
 - One main scene per beat, same id, start and duration as the brief. Each brief overlay is ONE scene with layer "overlay", same id and time range. A background the brief wants is ONE scene with layer "background" spanning the whole film; add no background or overlay the brief does not have.
-- Each brief transition of kind "cover" is ONE scene with layer "transition", same id, start = at - duration/2, that duration, no text: it covers the whole frame at its midpoint (hiding the cut) in theme colours and uncovers into the next beat. Use a block from its shortlist only if one fits, else hand-build (build says the shapes, colours and direction).
+- Each brief transition of kind "cover" is ONE scene with layer "transition", same id, start = at - duration/2 written as the computed number (2.7, never "3 - 0.6/2"), that duration, no text: it covers the whole frame at its midpoint (hiding the cut) in theme colours and uncovers into the next beat. Use a block from its shortlist only if one fits, else hand-build (build says the shapes, colours and direction).
 - For a "handoff" transition there is no scene: the outgoing beat's motion ends with the exit and the next beat's motion starts with the matching entrance (e.g. whip: smear out 0.2 s / land blurred and sharpen 0.13 s). Say this in both scenes' motion.
 - vars holds only variable ids that the chosen block or components list. A hand-built scene with no components has empty vars: its layout, sizes and fonts go in build.
 - For each scene pick a block from that beat's shortlist BY ITS DESCRIPTION: what it shows must match the beat's intent AND the brief's look.mood (no 3D spectacle for a calm editorial piece, no diagram plates for a wordmark, no chat UI for a headline). If nothing fits, use null and hand-build.
@@ -393,11 +506,12 @@ ${JSON.stringify(rows, null, 1)}`, usage);
 
 // ---- Pipeline ----------------------------------------------------------------------
 
-export async function ask(provider, system, user, usage) {
+export async function ask(provider, system, user, usage, { signal } = {}) {
   const messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
   let max = config.maxOutputTokens;
   for (let attempt = 0; ; attempt++) {
-    const { message, finish, usage: u } = await chat(provider, messages, null, { maxOutputTokens: max });
+    signal?.throwIfAborted();
+    const { message, finish, usage: u } = await chat(provider, messages, null, { maxOutputTokens: max, signal });
     usage.input += u.input;
     usage.output += u.output;
     usage.calls += 1;
@@ -419,29 +533,82 @@ export function parseModelJson(text) {
   const a = s.indexOf('{');
   const b = s.lastIndexOf('}');
   if (a < 0 || b <= a) return null;
-  try {
-    const v = JSON.parse(s.slice(a, b + 1));
-    return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
-  } catch {
-    return null;
+  const body = s.slice(a, b + 1);
+  for (const text of [body, withArithmeticDone(body)]) {
+    try {
+      const v = JSON.parse(text);
+      return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
+    } catch { /* try the next form */ }
   }
+  return null;
 }
 
-export async function runPlan({ prompt, onEvent = () => {}, jobsDir } = {}) {
+// Some models write a value as the sum it came from ("start": 3 - 0.6 / 2). Outside strings only,
+// a value that is plain numbers and + - * / becomes its result; anything else is left to fail.
+const NUM = String.raw`-?\d+(?:\.\d+)?`;
+const ARITH_VALUE = new RegExp(String.raw`("(?:[^"\\]|\\.)*")|(:\s*)(${NUM}(?:\s*[-+*/]\s*${NUM})+)(?=\s*[,}\]])`, 'g');
+
+function withArithmeticDone(text) {
+  return text.replace(ARITH_VALUE, (m, str, colon, expr) => {
+    if (str !== undefined) return m;
+    const v = evalArithmetic(expr);
+    return Number.isFinite(v) ? `${colon}${+v.toFixed(6)}` : m;
+  });
+}
+
+function evalArithmetic(expr) {
+  const tokens = expr.match(new RegExp(String.raw`${NUM}|[-+*/]`, 'g'));
+  // Products first, then sums, left to right.
+  const terms = [Number(tokens[0])];
+  const signs = [];
+  for (let i = 1; i < tokens.length; i += 2) {
+    const [op, n] = [tokens[i], Number(tokens[i + 1])];
+    if (op === '*') terms[terms.length - 1] *= n;
+    else if (op === '/') terms[terms.length - 1] /= n;
+    else { signs.push(op); terms.push(n); }
+  }
+  return terms.slice(1).reduce((acc, t, i) => (signs[i] === '+' ? acc + t : acc - t), terms[0]);
+}
+
+// Settings picked in the app (aspect, length, theme) arrive as options, not prompt text.
+const ASPECT = { '16:9': [1920, 1080], '9:16': [1080, 1920], '1:1': [1080, 1080] };
+
+function settingsText(options = {}) {
+  const lines = [];
+  if (ASPECT[options.aspect]) lines.push(`- Aspect ${options.aspect}: ${ASPECT[options.aspect].join('x')}.`);
+  if (options.duration) lines.push(`- Duration: ${options.duration} s, unless the request itself gives a length.`);
+  if (options.theme && listThemes().some((t) => t.name === options.theme)) lines.push(`- Theme preset: ${options.theme} (set look.preset).`);
+  return lines.length ? `\n\nSettings chosen in the app:\n${lines.join('\n')}` : '';
+}
+
+export function checkSettings(brief, options = {}) {
+  const want = ASPECT[options.aspect];
+  if (want && (brief.format?.width !== want[0] || brief.format?.height !== want[1])) return [`format must be ${want.join('x')} (aspect ${options.aspect} was chosen in the app)`];
+  return [];
+}
+
+// dir: re-plan inside an existing job folder (a resumed job) instead of creating one.
+// judge: false skips the rating call (it only scores the plan; the build does not need it).
+export async function runPlan({ prompt, options = {}, onEvent = () => {}, jobsDir, dir, judge: withJudge = true, signal, mode = 'plan-only' } = {}) {
   const provider = providerForRole('planner');
-  const ws = Workspace.create(jobsDir);
+  const ws = dir ? Workspace.open(dir) : Workspace.create(jobsDir);
   const lib = new SkillLibrary(config.skillsDir);
   const usage = { input: 0, output: 0, calls: 0 };
-  ws.writeJson('request.json', { prompt, createdAt: new Date().toISOString(), mode: 'plan-only' });
+  const prior = ws.readJson('request.json', {});
+  ws.writeJson('request.json', { ...prior, prompt, options, createdAt: prior.createdAt ?? new Date().toISOString(), mode });
+  onEvent({ type: 'job_start', job: ws.id, dir: ws.dir, resume: Boolean(dir) });
+  const askP = (system, user) => ask(provider, system, user, usage, { signal });
+  const request = `${prompt}${settingsText(options)}`;
+  const briefProblems = (b) => (Array.isArray(b?.beats) ? [...checkBrief(b, prompt, options), ...checkSettings(b, options)] : ['reply was not a brief object with beats[] (cut off or invalid JSON)']);
 
   // 1. Understand
   onEvent({ type: 'step', step: 'understand', provider: `${provider.name}/${provider.model}` });
-  let brief = await ask(provider, UNDERSTAND_SYSTEM, prompt, usage);
-  let briefErrs = (Array.isArray(brief?.beats) ? checkBrief(brief, prompt) : ['reply was not a brief object with beats[] (cut off or invalid JSON)']);
+  let brief = await askP(UNDERSTAND_SYSTEM, request);
+  let briefErrs = briefProblems(brief);
   if (briefErrs.length) {
     onEvent({ type: 'repair', step: 'understand', errors: briefErrs });
-    brief = await ask(provider, UNDERSTAND_SYSTEM, `${prompt}\n\nYour previous brief had these problems; fix them:\n- ${briefErrs.join('\n- ')}\n\nPrevious brief:\n${JSON.stringify(brief)}`, usage);
-    briefErrs = (Array.isArray(brief?.beats) ? checkBrief(brief, prompt) : ['reply was not a brief object with beats[] (cut off or invalid JSON)']);
+    brief = await askP(UNDERSTAND_SYSTEM, `${request}\n\nYour previous brief had these problems; fix them:\n- ${briefErrs.join('\n- ')}\n\nPrevious brief:\n${JSON.stringify(brief)}`);
+    briefErrs = briefProblems(brief);
   }
   if (!Array.isArray(brief?.beats)) {
     ws.writeJson('brief.raw.json', { raw: usage.lastRaw ?? null });
@@ -449,6 +616,27 @@ export async function runPlan({ prompt, onEvent = () => {}, jobsDir } = {}) {
   }
   ws.writeJson('brief.json', brief);
   onEvent({ type: 'brief', brief, errors: briefErrs });
+
+  // 1b. Story: three storylines, build the recommended one (falls back to the brief if it can't keep it intact).
+  let storyline = null;
+  const gate = storyApplies(brief, prompt);
+  if (gate.applies) {
+    onEvent({ type: 'step', step: 'story' });
+    const { story, errs } = await storyPass(askP, lib, brief, request, prompt, options, onEvent);
+    if (!errs.length) {
+      ws.writeJson('brief.original.json', brief);
+      brief = story.brief;
+      storyline = story.storylines[story.pick];
+      ws.writeJson('brief.json', brief);
+      ws.writeJson('story.json', story);
+      fs.writeFileSync(ws.meta('STORYLINES.md'), storylinesMarkdown(story));
+      onEvent({ type: 'story', story, brief });
+    } else {
+      onEvent({ type: 'story', skipped: `the storyline broke the brief: ${errs.join('; ')}` });
+    }
+  } else {
+    onEvent({ type: 'story', skipped: gate.why });
+  }
 
   // 2. Shortlist (code)
   onEvent({ type: 'step', step: 'shortlist' });
@@ -459,18 +647,22 @@ export async function runPlan({ prompt, onEvent = () => {}, jobsDir } = {}) {
   // 3. Plan
   onEvent({ type: 'step', step: 'plan' });
   const system = planSystem(lib);
-  const input = `<brief>\n${JSON.stringify(brief, null, 1)}\n</brief>\n\n<shortlist>\n${shortlistText(lists)}\n</shortlist>`;
+  const input = [
+    `<brief>\n${JSON.stringify(brief, null, 1)}\n</brief>`,
+    storyline ? `<storyline>\nThe film tells this storyline; SPEC.md, each scene's build and motion follow it.\n${JSON.stringify(storyline, null, 1)}\n</storyline>` : null,
+    `<shortlist>\n${shortlistText(lists)}\n</shortlist>`,
+  ].filter(Boolean).join('\n\n');
   const ctx = { ws, seenRegistry: new Set(allItems(lists).map((i) => i.name)), readLog: new Set() };
   const validate = async (p) => {
     if (!Array.isArray(p?.scenes)) return 'reply was not a plan object with scenes[] (cut off or invalid JSON); reply with the whole plan';
     const errs = [await plannerHandoff.validate(p, ctx), ...planChecks(p, brief, lists)].filter(Boolean);
     return errs.length ? errs.join('\n') : null;
   };
-  let plan = await ask(provider, system, input, usage);
+  let plan = await askP(system, input);
   let problems = await validate(plan);
   if (problems) {
     onEvent({ type: 'repair', step: 'plan', errors: problems.split('\n') });
-    plan = await ask(provider, system, `${input}\n\nYour previous plan had these problems; fix them and reply with the whole plan:\n${problems}\n\nPrevious plan:\n${JSON.stringify(plan)}`, usage);
+    plan = await askP(system, `${input}\n\nYour previous plan had these problems; fix them and reply with the whole plan:\n${problems}\n\nPrevious plan:\n${JSON.stringify(plan)}`, usage);
     problems = await validate(plan);
   }
   if (!Array.isArray(plan?.scenes)) {
@@ -480,8 +672,8 @@ export async function runPlan({ prompt, onEvent = () => {}, jobsDir } = {}) {
   ws.writeJson('plan.json', plan);
 
   // 4. Rate (code)
-  onEvent({ type: 'step', step: 'judge' });
-  const judge = await judgePlan(provider, plan, brief, lists, usage, prompt).catch(() => null);
+  if (withJudge) onEvent({ type: 'step', step: 'judge' });
+  const judge = withJudge ? await judgePlan(provider, plan, brief, lists, usage, prompt).catch(() => null) : null;
   ws.writeJson('judge.json', judge);
   const rating = ratePlan(plan, brief, problems, { lists, judge });
   ws.writeJson('rating.json', rating);

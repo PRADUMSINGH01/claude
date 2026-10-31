@@ -183,6 +183,8 @@ await step('model JSON: whole reply or nothing (a cut-off plan must not parse as
   assert.equal(parseModelJson('{"title":"x","scenes":[{"id":"a","vars":{"k":1}},{"id":"b"'), null);
   assert.equal(parseModelJson('no json here'), null);
   assert.equal(parseModelJson('[1,2]'), null);
+  // Arithmetic a model left in a value is worked out; the same text inside a string is not touched.
+  assert.deepEqual(parseModelJson('{"start": 3 - 0.6 / 2, "d": -1 + 4*2, "s": "at: 3 - 1,"}'), { start: 2.7, d: 7, s: 'at: 3 - 1,' });
 });
 
 await step('transitions: on seams, cover scenes centred and text-free, handoffs need no scene', async () => {
@@ -214,6 +216,24 @@ await step('brief keeps every colour the request gives (code check, not a prompt
   const kept = { ground: '#0E0B1F', ink: '#FFFFFF', accent: '#7B5CFF', coral: '#FF5A5F', lime: '#C6FF4A' };
   assert.deepEqual(checkBrief({ ...base, look: { colors: kept } }, prompt), []);
   assert.deepEqual(checkBrief({ ...base, look: { preset: 'coral', colors: {} } }, 'theme: coral, "GO"'), []);
+});
+
+await step('story step: only for unscripted films over 15 s; figures on screen come from the request', async () => {
+  const { storyApplies, checkBrief, storylinesMarkdown } = await import('../src/plan.js');
+  const brief = (duration, kind = 'launch') => ({ kind, format: { duration } });
+  assert.equal(storyApplies(brief(30), 'A launch film for Ferry, a ferry booking app').applies, true);
+  assert.equal(storyApplies(brief(10), 'A launch film for Ferry').applies, false);
+  assert.equal(storyApplies(brief(30, 'title'), 'A title card').applies, false);
+  assert.equal(storyApplies(brief(30), 'Beat 1: "Hello". Beat 2: "World"').applies, false);
+  assert.equal(storyApplies(brief(30), 'headline 0-5 s, logo 5-10 s').applies, false);
+  const one = (copy) => ({ format: { duration: 4 }, background: { wanted: false }, beats: [{ id: 'a', start: 0, end: 4, copy: [copy] }] });
+  const said = 'Builds went from 40 min to 2 min for 1,200 teams';
+  assert.deepEqual(checkBrief(one('40 min to 2 min'), said), []);
+  assert.deepEqual(checkBrief(one('1200 teams'), said), []);
+  assert.match(checkBrief(one('20x faster'), said).join(), /shows 20, which the request never gives/);
+  const md = storylinesMarkdown({ one_thing: 'x', remember: 'y', spine: 'z', pick: 1, reason: 'r', storylines: ['A', 'B', 'C'].map((name) => ({ name, device: 'd', form: 'f' })) });
+  assert.match(md, /## ★ 2\. B \(built\)/);
+  assert.match(md, /## 1\. A\n/);
 });
 
 await step('access rules', () => {

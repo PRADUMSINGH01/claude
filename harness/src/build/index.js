@@ -187,6 +187,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
     for (const s of escalate) {
       s.escalatedFrom = s.item;
       s.escalationReason = issues.filter((i) => i.id === s.id).map((i) => i.problem).join('; ');
+      delete s.scale; // the scale was for the item's drawing; a written scene sizes itself
       s.mode = 'write';
       s.file = `compositions/${s.id}.html`;
       s.compositionId = s.id;

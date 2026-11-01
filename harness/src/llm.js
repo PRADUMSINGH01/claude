@@ -32,7 +32,7 @@ function client(p) {
   return clients.get(key);
 }
 
-function requestBody(p, messages, tools, toolChoice, maxOut = config.maxOutputTokens) {
+export function requestBody(p, messages, tools, toolChoice, maxOut = config.maxOutputTokens) {
   const body = { model: p.model, messages };
   if (tools?.length) {
     body.tools = p.kind === 'gemini' ? tools.map((t) => ({ ...t, function: { ...t.function, parameters: geminiSchema(t.function.parameters) } })) : tools;
@@ -48,7 +48,9 @@ function requestBody(p, messages, tools, toolChoice, maxOut = config.maxOutputTo
     body.max_tokens = maxOut;
   }
   if (p.kind === 'gemini' && p.effort) body.reasoning_effort = p.effort === 'minimal' ? 'low' : p.effort;
-  if (p.kind === 'glm' && p.effort) body.thinking = { type: p.effort === 'none' ? 'disabled' : 'enabled' };
+  // GLM's thinking is only on or off. Low effort turns it off: thinking can spend a whole 16k–32k output
+  // budget before a single line of a scene file is written (seen in real runs).
+  if (p.kind === 'glm' && p.effort) body.thinking = { type: ['none', 'minimal', 'low'].includes(p.effort) ? 'disabled' : 'enabled' };
   return body;
 }
 

@@ -501,6 +501,13 @@ await step('agent loop: a reply cut off at the output limit runs none of its too
   assert.ok(events.some((e) => e.type === 'cut_off'));
 });
 
+await step('GLM: low effort turns thinking off, medium and up turn it on', async () => {
+  const { requestBody } = await import('../src/llm.js');
+  const glm = (effort) => requestBody({ kind: 'glm', model: 'glm', effort }, [], null).thinking?.type;
+  assert.deepEqual(['none', 'low', 'medium', 'xhigh'].map(glm), ['disabled', 'disabled', 'enabled', 'enabled']);
+  assert.equal(glm(''), undefined, 'no effort: the provider default');
+});
+
 await step('ids a model leaves out are filled in code, never "undefined"', async () => {
   const { fillIds } = await import('../src/plan.js');
   // What GLM's story step returned: transitions with no id.

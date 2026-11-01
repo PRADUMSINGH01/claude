@@ -44,7 +44,7 @@ const server = http.createServer((req, res) => {
   </script>
 </template>`;
     res.setHeader('content-type', 'application/json');
-    res.end(JSON.stringify({ id: 'c', object: 'chat.completion', created: 0, model: 'fake', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify({ html }) } }], usage: { prompt_tokens: 100, completion_tokens: 50 } }));
+    res.end(JSON.stringify({ id: 'c', object: 'chat.completion', created: 0, model: 'fake', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: `\`\`\`html\n${html}\n\`\`\`` } }], usage: { prompt_tokens: 100, completion_tokens: 50 } }));
   });
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));

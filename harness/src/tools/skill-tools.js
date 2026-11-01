@@ -37,6 +37,14 @@ export function readSection(lib, skill, file, section) {
   return section ? subtree(sections, section) : sections.map((s) => s.text).join('\n\n');
 }
 
+// A section a pipeline prompt is built from. If a skills update renamed or moved it, stop with its name
+// instead of sending the model a prompt that silently lacks it (selftest builds every prompt to catch this).
+export function requireSection(lib, skill, file, section) {
+  const text = readSection(lib, skill, file, section);
+  if (!text?.trim()) throw new Error(`Skill section missing: ${skill}/${file}${section ? `#${section}` : ''}. The installed skills changed; point the harness at its new place.`);
+  return text;
+}
+
 function outline(lib, skill, file, readLog) {
   const sections = lib.sections(skill, file);
   return sections

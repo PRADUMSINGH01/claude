@@ -2,9 +2,12 @@
 // motion run "<prompt>" [--theme coral] [--aspect 9:16] [--duration 20] [--jobs dir]
 // motion resume <job-dir>
 // motion themes | motion skills <role> | motion providers
+import fs from 'node:fs';
+import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { config, providerStatus, useProvider } from '../src/config.js';
 import { runJob } from '../src/orchestrator.js';
+import { runFilm } from '../src/film.js';
 import { runPlan } from '../src/plan.js';
 import { runBuild } from '../src/build/index.js';
 import { SkillLibrary } from '../src/skills/library.js';
@@ -26,15 +29,18 @@ const { values, positionals } = parseArgs({
     fixer: { type: 'string' },
     json: { type: 'boolean', default: false },
     look: { type: 'boolean', default: false },
+    'no-look': { type: 'boolean', default: false },
     'no-render': { type: 'boolean', default: false },
+    agents: { type: 'boolean', default: false },
     'max-tokens': { type: 'string' },
     help: { type: 'boolean', short: 'h' },
   },
 });
 
 const [cmd, ...rest] = positionals;
-const USAGE = `motion run "<prompt>" [--theme <preset>] [--aspect 16:9|9:16|1:1] [--duration <s>] [--json]
-motion resume <job-dir> [--json]
+const USAGE = `motion run "<prompt>" [--theme <preset>] [--aspect 16:9|9:16|1:1] [--duration <s>] [--no-look] [--no-render] [--json]
+                                 plan + build (as on the server); --agents runs the older agent loops instead
+motion resume <job-dir> [--json] continues a job with the pipeline it started with
 motion plan "<prompt>"           plan only (no video): brief → story → shortlist → plan → rating
 motion build <plan-job-dir>      build an approved plan: assemble → write scenes → verify → render  [--look] [--no-render] [--max-tokens N]
 motion providers                 which AI providers have keys, their models, which role uses which
@@ -72,6 +78,7 @@ function printBuildEvent(ev) {
     case 'look': return console.log(ev.issues.length ? ev.issues.map((i) => `  👁 ${i.scene}: ${i.problem} → ${i.fix}`).join('\n') : '  👁 no visible issues');
     case 'cap': return console.log(`  ⛔ token cap reached (${k(ev.used)} of ${k(ev.maxTokens)}): ${ev.label} skipped, fallback used`);
     case 'error': return console.log(`  ✖ ${ev.label}: ${ev.error}`);
+    case 'warning': return console.log(`  ⚠ ${ev.message}`);
     case 'render_done': return console.log(`  render ${ev.ok ? 'ok' : 'FAILED'}`);
     case 'done': return console.log(`
 ■ done: ${ev.usage.calls} model calls, ${k(ev.usage.input)} in / ${k(ev.usage.output)} out, ${ev.usage.minutes} min
@@ -81,7 +88,7 @@ function printBuildEvent(ev) {
   }
 }
 
-function printPlanEvent(ev) {
+function printPlanEvent(ev, { rating = true } = {}) {
   if (values.json) return console.log(JSON.stringify(ev));
   const k = (n) => `${(n / 1000).toFixed(1)}k`;
   switch (ev.type) {
@@ -112,14 +119,37 @@ function printPlanEvent(ev) {
       for (const s of ev.plan.scenes) console.log(`  ${(s.layer ?? 'main').padEnd(10)} ${String(s.start).padStart(4)}–${+(s.start + s.duration).toFixed(2)}s  ${s.id}: ${s.block ?? 'hand-built'}${s.components?.length ? ` + ${s.components.join(', ')}` : ''}  ${Object.keys(s.vars ?? {}).length ? `vars ${JSON.stringify(s.vars).slice(0, 90)}` : ''}`);
       console.log(`  theme: ${ev.plan.theme?.preset ?? JSON.stringify(ev.plan.theme?.colors ?? {})}`);
       if (ev.problems) console.log(`  ⚠ plan checks: ${ev.problems.split('\n').join(' | ').slice(0, 400)}`);
-      console.log(`\n■ rating ${ev.rating.score}/${ev.rating.max}`);
-      for (const i of ev.rating.items) console.log(`  ${i.points === i.max ? '✓' : '✗'} ${i.label} (${+i.points.toFixed(1)}/${i.max}) ${i.note}`);
-      console.log(`\n■ tokens: ${ev.usage.calls} calls, ${k(ev.usage.input)} in / ${k(ev.usage.output)} out`);
+      if (rating) {
+        console.log(`\n■ rating ${ev.rating.score}/${ev.rating.max}`);
+        for (const i of ev.rating.items) console.log(`  ${i.points === i.max ? '✓' : '✗'} ${i.label} (${+i.points.toFixed(1)}/${i.max}) ${i.note}`);
+      }
+      console.log(`${rating ? '\n■ tokens' : '  planning'}: ${ev.usage.calls} calls, ${k(ev.usage.input)} in / ${k(ev.usage.output)} out`);
       return;
     }
     default: return undefined;
   }
 }
+
+// motion run: plan events, then build events (runFilm skips the plan's rating, so none is printed).
+const PLAN_EVENTS = new Set(['step', 'repair', 'brief', 'story', 'shortlist', 'plan']);
+function printFilmEvent(ev) {
+  if (values.json) return console.log(JSON.stringify(ev));
+  switch (ev.type) {
+    case 'job_start': return console.log(`job ${ev.job}  ${ev.dir}${ev.resume ? '  (resumed)' : ''}`);
+    case 'plan_warnings': return console.log(`  ⚠ the plan still has: ${ev.problems.join(' | ').slice(0, 400)}`);
+    case 'job_failed': return console.error(`✖ failed: ${ev.error}`);
+    default: return PLAN_EVENTS.has(ev.type) ? printPlanEvent(ev, { rating: false }) : printBuildEvent(ev);
+  }
+}
+
+// The pipeline a job folder was started with: plan + build jobs record a mode, agent-loop jobs don't.
+const startedWithAgents = (dir) => {
+  try {
+    return !JSON.parse(fs.readFileSync(path.join(dir, 'harness', 'request.json'), 'utf8')).mode;
+  } catch {
+    return false;
+  }
+};
 
 function printEvent(ev) {
   if (values.json) return console.log(JSON.stringify(ev));
@@ -160,17 +190,25 @@ try {
     if (values.duration) options.duration = Number(values.duration);
     const ac = new AbortController();
     process.on('SIGINT', () => ac.abort());
-    const result = await runJob({
+    const job = {
       prompt: cmd === 'run' ? rest.join(' ') : undefined,
       resume: cmd === 'resume' ? rest[0] : undefined,
       options,
       jobsDir: values.jobs,
-      onEvent: printEvent,
       signal: ac.signal,
-    });
+    };
+    // plan + build, as on the server; the older agent loops on request or for a job they started.
+    const agents = job.resume ? startedWithAgents(job.resume) : values.agents || process.env.PIPELINE === 'agents';
+    const render = !values['no-render'];
+    const result = agents
+      ? await runJob({ ...job, onEvent: printEvent })
+      : await runFilm({ ...job, onEvent: printFilmEvent, render, look: !values['no-look'] && process.env.BUILD_LOOK !== 'false' });
     if (values.json) console.log(JSON.stringify({ type: 'result', ...result }));
-    else console.log(`\nVideo: ${result.video ?? '(verification failed — see harness/result.json)'}\nProject: ${result.project}`);
-    if (!result.video) process.exitCode = 2;
+    else {
+      console.log(`\nVideo: ${result.video ?? (render ? '(verification failed — see harness/result.json)' : '(not rendered)')}\nProject: ${result.project}`);
+      if (result.fallbacks?.length) console.log(`⚠ ${result.fallbacks.length} scene(s) fell back to a plain text reveal: ${result.fallbacks.join(', ')} (why: harness/build-report.md)`);
+    }
+    if (!result.video && render) process.exitCode = 2;
   } else {
     console.error(USAGE);
     process.exitCode = 64;

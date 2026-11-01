@@ -65,9 +65,11 @@ export async function runFilm({ prompt, options = {}, resume, jobsDir, onEvent, 
 
     const report = await runBuild(ws.dir, { onEvent: emit, look, render, signal });
     const plan = ws.readJson('plan.json');
+    // Scenes the model could not get right and code replaced with a plain reveal: the film is weaker there.
+    const fallbacks = Object.entries(report.scenes).filter(([, s]) => String(s.result).startsWith('fallback')).map(([id]) => id);
     if (!render) {
       ws.setState({ stage: 'built', error: null });
-      return { job: ws.id, video: null, project: ws.projectDir, title: plan.title, usage: ws.readJson('usage.json', {}), report };
+      return { job: ws.id, video: null, project: ws.projectDir, title: plan.title, usage: ws.readJson('usage.json', {}), report, fallbacks };
     }
     const verify = report.render ?? { ok: false, reason: 'not rendered' };
     if (!verify.ok) throw new Error(`Render failed or did not verify${verify.log ? `:\n${verify.log}` : verify.drift ? ` (duration off by ${verify.drift.toFixed(2)}s)` : ''}`);
@@ -81,7 +83,7 @@ export async function runFilm({ prompt, options = {}, resume, jobsDir, onEvent, 
       expectedDuration: plan.format.duration,
       verify,
       usage: ws.readJson('usage.json', {}),
-      fallbacks: Object.entries(report.scenes).filter(([, s]) => String(s.result).startsWith('fallback')).map(([id]) => id),
+      fallbacks,
     };
     ws.writeJson('result.json', result);
     ws.setState({ stage: 'done', error: null });

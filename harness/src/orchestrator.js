@@ -129,6 +129,8 @@ export async function runJob({ prompt, options = {}, resume, jobsDir, onEvent, s
 
     // 5. Critic ⇄ fixer rounds.
     if (!after(state.stage, 'reviewed')) {
+      const critic = providerForRole('critic');
+      if (!critic.vision) emit('warning', { message: `the critic (${critic.name}/${critic.model}) cannot see images, so it reviews only code and check results; set CRITIC to a provider with vision for a visual review` });
       let previous = ws.readJson(`review-${state.round}.json`);
       for (let round = state.round + 1; round <= config.reviewRounds; round++) {
         const check = await runCheck(ws);
@@ -186,7 +188,7 @@ export async function runJob({ prompt, options = {}, resume, jobsDir, onEvent, s
       usage,
     };
     ws.writeJson('result.json', result);
-    ws.setState({ stage: 'done' });
+    ws.setState({ stage: 'done', error: null });
     emit('job_done', { video: result.video, duration: verify.duration, ok: verify.ok });
     return result;
   } catch (err) {

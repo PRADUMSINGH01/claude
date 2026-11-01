@@ -11,19 +11,25 @@ const PASS_ENV = ['PATH', 'LANG', 'LC_ALL', 'TZ', 'HTTP_PROXY', 'HTTPS_PROXY', '
   'SYSTEMROOT', 'SYSTEMDRIVE', 'COMSPEC', 'PATHEXT', 'WINDIR', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMFILES', 'PROGRAMDATA', 'TEMP', 'TMP'];
 
 let browserPath = null;
+let bashBin = null;
 
+// Windows: Git for Windows' bash. BASH_PATH wins; else the usual install folders; else the Git that is on
+// PATH (cmd\git.exe or mingw64\bin\git.exe sit under the same root as bin\bash.exe). A bare "bash" on
+// Windows can be the WSL launcher, so it is only the last resort.
 export function getBashBin() {
   if (process.platform !== 'win32') return 'bash';
+  if (bashBin) return bashBin;
+  const fromGit = (process.env.PATH ?? '').split(path.delimiter).filter((d) => d && fs.existsSync(path.join(d, 'git.exe')))
+    .flatMap((d) => [path.dirname(d), path.dirname(path.dirname(d))].map((root) => path.join(root, 'bin', 'bash.exe')));
   const candidates = [
-    'D:\\Donwload-main\\Git\\bin\\bash.exe',
+    process.env.BASH_PATH,
     'C:\\Program Files\\Git\\bin\\bash.exe',
     'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
     path.join(process.env.LOCALAPPDATA ?? '', 'Programs', 'Git', 'bin', 'bash.exe'),
-  ];
-  for (const c of candidates) {
-    if (fs.existsSync(c)) return c;
-  }
-  return 'bash';
+    ...fromGit,
+  ].filter(Boolean);
+  bashBin = candidates.find((c) => fs.existsSync(c)) ?? 'bash';
+  return bashBin;
 }
 
 // The pinned Chrome lives in the harness user's cache; agents get its path, not that user's HOME.

@@ -113,10 +113,13 @@ const server = http.createServer((req, res) => {
       const id = /data-composition-id="([a-z0-9-]+)"/.exec(msgs[1].content)?.[1] ?? 'x';
       const copy = JSON.parse(/<scene>\n([\s\S]*?)\n<\/scene>/.exec(msgs[1].content)?.[1] ?? '{"scene":{"copy":[]}}').scene.copy ?? [];
       const dur = Number(JSON.parse(/<scene>\n([\s\S]*?)\n<\/scene>/.exec(msgs[1].content)?.[1] ?? '{"scene":{}}').scene.duration) || 1;
+      // The last scene's first draft leaves 0.8 s early (the blank ending a real run shipped): the film
+      // check must catch it and the repair must keep the copy to the end.
+      const early = id === 'wordmark' && !String(msgs[1].content).includes('<problems>');
       const html = `<template>
   <style>#root { position: absolute; inset: 0; container-type: size; display: flex; align-items: center; justify-content: center; font-family: var(--font-display); color: var(--fg); } #root .${id}-t { font-size: 9cqh; }</style>
   <div id="root" data-composition-id="${id}">
-    <div id="${id}-t" class="clip ${id}-t" data-start="0" data-duration="${dur}"><span>${copy.join(' ')}</span></div>
+    <div id="${id}-t" class="clip ${id}-t" data-start="0" data-duration="${early ? dur - 0.8 : dur}"><span>${copy.join(' ')}</span></div>
   </div>
   <script>
     const tl = gsap.timeline({ paused: true });
@@ -124,7 +127,7 @@ const server = http.createServer((req, res) => {
     window.__timelines["${id}"] = tl;
   </script>
 </template>`;
-      return res.end(reply(JSON.stringify({ html })));
+      return res.end(reply(`Here is the scene.\n\`\`\`html\n${html}\n\`\`\``));
     }
     calls.other++;
     return res.end(reply('{"issues":[]}'));
@@ -134,7 +137,9 @@ await new Promise((r) => server.listen(0, '127.0.0.1', r));
 config.providers.fake = { kind: 'openai', apiKey: 'x', baseURL: `http://127.0.0.1:${server.address().port}/v1/`, model: 'fake', effort: '', vision: false };
 for (const role of Object.keys(config.roles)) config.roles[role] = 'fake';
 
+const events = [];
 const log = (e) => {
+  events.push(e);
   if (['job_start', 'step', 'scene', 'check', 'measured', 'render_done', 'job_done', 'job_failed', 'plan_warnings'].includes(e.type)) console.log(JSON.stringify(e).slice(0, 200));
 };
 
@@ -153,6 +158,11 @@ try {
   assert.equal(req.mode, 'plan-build', 'the server picks the resume pipeline from request.mode');
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'harness', 'state.json'), 'utf8')).stage, render ? 'done' : 'built');
   for (const f of ['brief.json', 'plan.json', 'build-report.md', 'events.jsonl']) assert.ok(fs.existsSync(path.join(dir, 'harness', f)), `missing ${f}`);
+  const archived = fs.readdirSync(path.join(dir, 'harness', 'calls'));
+  for (const label of ['understand', 'plan', 'write-headline', 'write-wordmark']) assert.ok(archived.some((f) => f.endsWith(`-${label}.json`)), `calls/ has no ${label} call: ${archived.join(', ')}`);
+  assert.deepEqual(first.fallbacks, [], 'both scenes are the written ones, not fallbacks');
+  assert.ok(events.some((e) => e.type === 'scene' && e.id === 'wordmark' && e.step === 'film repair' && /blank at t=5\.75s/.test([].concat(e.problems).join())), 'the blank ending was measured and sent back for repair');
+  assert.match(fs.readFileSync(path.join(dir, 'project', 'compositions', 'wordmark.html'), 'utf8'), /data-duration="3"/, 'the repaired last scene holds its copy to the end');
   assert.ok(first.usage.planner && first.usage.builder, 'usage.json has planner and builder');
   console.log(`\nok  new film: ${first.video ?? '(not rendered)'}, calls ${JSON.stringify(calls)}`);
 

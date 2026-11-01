@@ -17,11 +17,11 @@ seeking a paused GSAP timeline frame by frame), plus the HTTP API the web fronte
 
 ## Pipelines
 
-**The API server** uses `runFilm` (`harness/src/film.js`): plan + build below as one resumable job,
-with the app's aspect, length and theme passed into planning. A retried job resumes with the
-pipeline it started with; `PIPELINE=agents` switches new jobs back to the agent loops.
+**`motion run` and the API server** use `runFilm` (`harness/src/film.js`): plan + build below as one
+resumable job, with the app's aspect, length and theme passed into planning. A resumed job keeps the
+pipeline it started with; `motion run --agents` or `PIPELINE=agents` runs new jobs on the agent loops.
 
-**`motion run` — `harness/src/orchestrator.js`** (the agent loops) (resumable stages in `jobs/<id>/harness/state.json`)
+**`motion run --agents` — `harness/src/orchestrator.js`** (the older agent loops, far more tokens) (resumable stages in `jobs/<id>/harness/state.json`)
 
 1. `init` — `hyperframes init` (code).
 2. `planned` — **planner** agent → `SPEC.md`, `plan.json`, theme (registry blocks + one theme).
@@ -34,8 +34,17 @@ pipeline it started with; `PIPELINE=agents` switches new jobs back to the agent 
 
 The cheaper split: plan in a few short model calls (brief → story → code shortlist → plan → rating), then build
 with code doing the mechanical work (project, theme tokens, fonts, block installs, root `index.html`)
-and the model writing only hand-built scenes, one call each, verified per scene with
-`check --composition`, repaired at most twice, else replaced by a code fallback. Hard token cap.
+and the model writing only hand-built scenes, one call each (the file comes back as a fenced `html`
+block, never inside JSON), verified per scene with `check --composition`, repaired at most twice, else
+replaced by a code fallback. Measured checks (ffmpeg) then catch blank scenes, a covered background,
+a transition that doesn't cover its cut and a film that goes blank before its end. Hard token cap.
+
+The optional **look** step (on by default in `motion run` and the server; `--no-look` turns it off) shows a
+contact sheet to the **critic's** provider, so `CRITIC=<a provider with vision>` gives a visual review
+while a cheaper text model writes the scenes. Without vision it is skipped, and the build report says so.
+
+Every plan and build model call is archived in `jobs/<id>/harness/calls/` (prompt, reply, tokens,
+`finish` reason; each system prompt stored once), so one call can be read or replayed with a new prompt.
 
 ## How the agents use the HyperFrames docs
 
@@ -54,6 +63,9 @@ picked storyline, and the build writes `SPEC.md` and `STORYLINES.md` into the pr
 The build's scene writer (`harness/src/build/scenes.js`) gets the contract plus the design sections:
 `motion.md#motion-craft`, `spec.md#composition-numbers`, `spec.md#banned-by-default` and
 `look.md#video-facts`. Its system prompt is identical for every scene so providers can cache it.
+Every section a pipeline prompt is built from is required (`requireSection`): if a skills update moves
+one, the job stops with its name instead of prompting without it, and `npm run selftest` builds every
+prompt so this shows up before a deploy.
 Planning takes a preset only when the request or the app names one, and rejects the fonts generated
 design defaults to (Inter, Space Grotesk, Instrument Serif, Geist, JetBrains Mono) unless asked for.
 
@@ -75,4 +87,9 @@ npm run motion -- run "A 20 second launch film for ..." --theme coral
 
 With Docker, see the comment at the top of `docker-compose.yml`.
 
-When the skills in `.agents/skills` are updated, `.claude/skills` follows through the symlink.
+On Windows the harness runs commands with Git for Windows' bash, found from the `git` on `PATH`;
+set `BASH_PATH` if it lives elsewhere.
+
+When the skills in `.agents/skills` are updated, `.claude/skills` follows through the symlink. A Windows
+checkout makes that symlink a plain text file unless git symlinks are enabled
+(`git config core.symlinks true` with Developer Mode on, then check the file out again).

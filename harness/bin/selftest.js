@@ -418,6 +418,98 @@ await step('agent loop against a fake OpenAI-compatible server', async () => {
   assert.ok(seen[0].tools.some((t) => t.function.name === 'read_skill'));
 });
 
+await step('every pipeline prompt builds from the installed skills (a moved section fails here, not quietly in a film)', async () => {
+  const { planSystem, storyGuides } = await import('../src/plan.js');
+  const { scenePacket } = await import('../src/build/scenes.js');
+  const { requireSection } = await import('../src/tools/skill-tools.js');
+  assert.match(planSystem(lib), /<spec-template>\n\S[\s\S]*<look-line>\n\S/);
+  const guides = storyGuides(lib, { kind: 'launch', format: { width: 1080, height: 1920 } });
+  assert.ok(guides.story.length > 1000 && guides.types.length > 500, 'the story guide plus the launch and vertical type guides');
+  const ctx = { format: { width: 1920, height: 1080, fps: 30 }, roles: { dark: true, ground: '#101014', ink: '#F2EDE4', accent: '#E8B14E', display: 'Inter', body: 'Inter' }, lib, items: {}, hasBackground: false };
+  assert.match(scenePacket({ id: 'a', layer: 'main', duration: 3, text: ['Hi'] }, ctx).system, /<contract>\n\S[\s\S]*<design>\n\S/);
+  assert.match(scenePacket({ id: 't-1', layer: 'transition', duration: 0.6, text: [] }, ctx).user, /<transitions>\n\S/);
+  assert.throws(() => requireSection(lib, 'hyperframes', 'references/look.md', 'no-such-section'), /Skill section missing: hyperframes\/references\/look\.md#no-such-section/);
+});
+
+await step('scene writer replies: a fenced html block, the older JSON shape, or a bare template', async () => {
+  const { extractHtml } = await import('../src/build/scenes.js');
+  const file = '<template>\n  <div id="root" data-composition-id="a"></div>\n  <script>const s = `x`;</script>\n</template>';
+  assert.equal(extractHtml(`Here is the scene.\n\`\`\`html\n${file}\n\`\`\`\n`), file);
+  assert.equal(extractHtml(JSON.stringify({ html: file })), file);
+  assert.equal(extractHtml(`\`\`\`json\n${JSON.stringify({ html: file })}\n\`\`\``), file);
+  assert.equal(extractHtml(`Sure:\n${file}\nDone.`), file);
+  assert.equal(extractHtml('```html\n<template>\n  <div id="root">cut off mid-'), null);
+  assert.equal(extractHtml('I cannot help with that.'), null);
+});
+
+await step('tool arguments are checked against the tool schema: precise errors, lossless fixes, unknown keys dropped', async () => {
+  const { checkArgs } = await import('../src/agent.js');
+  const schema = {
+    type: 'object',
+    properties: {
+      skill: { type: 'string' }, part: { type: 'integer' }, kind: { type: 'string', enum: ['a', 'b'] }, on: { type: 'boolean' },
+      list: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },
+    },
+    required: ['skill'],
+    additionalProperties: false,
+  };
+  assert.deepEqual(checkArgs(schema, { skill: 'x', part: 2 }), []);
+  assert.deepEqual(checkArgs(schema, { file: 'y' }), ['args.skill is required']);
+  const fixed = { skill: 'x', part: '2', on: 'true', note: 'extra' };
+  assert.deepEqual(checkArgs(schema, fixed), []);
+  assert.deepEqual(fixed, { skill: 'x', part: 2, on: true });
+  assert.match(checkArgs(schema, { skill: 'x', part: 'two' }).join(), /args\.part must be integer, not string/);
+  assert.match(checkArgs(schema, { skill: 'x', kind: 'c' }).join(), /args\.kind must be one of "a", "b"/);
+  assert.match(checkArgs(schema, { skill: 'x', list: [{}] }).join(), /args\.list\[0\]\.id is required/);
+  // The real case from a run: read_skill without its skill reached the tool as "undefined".
+  const readSkill = makeSkillTools().find((t) => t.name === 'read_skill');
+  assert.deepEqual(checkArgs(readSkill.parameters, { file: 'references/review.md', section: '3-notes-and-fixes' }), ['args.skill is required']);
+});
+
+await step('agent loop: a reply cut off at the output limit runs none of its tool calls and gets more room', async () => {
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (d) => (body += d));
+    req.on('end', () => {
+      seen.push(JSON.parse(body));
+      const first = seen.length === 1;
+      const fn = first
+        ? { name: 'write_file', arguments: '{"path":"big.html","content":"<template>\\n  <div id=\\"root\\">' }
+        : { name: 'submit_test', arguments: JSON.stringify({ answer: 'ok' }) };
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ id: 'x', object: 'chat.completion', created: 0, model: 'fake', choices: [{ index: 0, finish_reason: first ? 'length' : 'tool_calls', message: { role: 'assistant', content: null, tool_calls: [{ id: `c${seen.length}`, type: 'function', function: fn }] } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }));
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  config.providers.fake = { kind: 'openai', apiKey: 'x', baseURL: `http://127.0.0.1:${server.address().port}/v1/`, model: 'fake', effort: '', vision: false };
+  config.roles.fixer = 'fake';
+  const { runAgent } = await import('../src/agent.js');
+  const { makeFileTools } = await import('../src/tools/project-tools.js');
+  const events = [];
+  const ctx = { ...ctxFor('fixer', ws), emit: (type, d) => events.push({ type, ...d }) };
+  ctx.readLog = new Set(['hyperframes/references/format.md#lint-errors-you-ll-meet-first']);
+  const out = await runAgent({
+    role: 'fixer', system: 'sys', task: 'task', tools: makeFileTools({ write: true }), ctx,
+    handoff: { name: 'submit_test', description: 'd', parameters: { type: 'object', properties: { answer: { type: 'string' } } } },
+  });
+  server.close();
+  assert.equal(out.result.answer, 'ok');
+  assert.ok(!fs.existsSync(path.join(ws.projectDir, 'big.html')), 'the half-written file must not be written');
+  assert.equal(seen[1].max_completion_tokens, seen[0].max_completion_tokens * 2);
+  assert.match(String(seen[1].messages.at(-1).content), /cut off at the output limit/);
+  assert.ok(events.some((e) => e.type === 'cut_off'));
+});
+
+await step('plan and build model calls are archived, each system prompt once', () => {
+  ws.logCall({ label: 'write headline', system: 'SYS', user: 'u1', reply: 'r1' });
+  ws.logCall({ label: 'repair headline', system: 'SYS', user: 'u2', reply: 'r2' });
+  const files = fs.readdirSync(ws.meta('calls')).sort();
+  assert.equal(files.filter((f) => f.startsWith('system-')).length, 1);
+  assert.deepEqual(files.filter((f) => /^\d/.test(f)), ['001-write-headline.json', '002-repair-headline.json']);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(ws.meta('calls'), '002-repair-headline.json'), 'utf8')).reply, 'r2');
+});
+
 if (!quick) {
   const { initProject, installRegistryItems } = await import('../src/orchestrator.js');
   const { applyTheme, catalogSearch, listThemes } = await import('../src/tools/registry-tools.js');

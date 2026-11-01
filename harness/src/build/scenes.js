@@ -3,29 +3,30 @@
 // only; at most two repairs; a code fallback if it still fails. No tool loop, no shared history.
 import fs from 'node:fs';
 import path from 'node:path';
-import { readSection } from '../tools/skill-tools.js';
+import { parseModelJson } from '../plan.js';
+import { requireSection } from '../tools/skill-tools.js';
 import { fallbackScene, skeleton } from './scene-files.js';
 
 const BOX_SIZE = { top: [1, 0.3], bottom: [1, 0.22], corner: [0.32, 0.16], full: [1, 1] };
 
-const transitionText = (lib) => readSection(lib, 'hyperframes', 'references/motion.md', 'transitions-with-a-cause') ?? '';
+const transitionText = (lib) => requireSection(lib, 'hyperframes', 'references/motion.md', 'transitions-with-a-cause');
 
 function contractText(lib) {
   return [
-    readSection(lib, 'hyperframes', 'SKILL.md', 'contract'),
-    readSection(lib, 'hyperframes', 'references/format.md', 'shape-of-a-project'),
-  ].filter(Boolean).join('\n\n');
+    requireSection(lib, 'hyperframes', 'SKILL.md', 'contract'),
+    requireSection(lib, 'hyperframes', 'references/format.md', 'shape-of-a-project'),
+  ].join('\n\n');
 }
 
 // How a scene should look and move, not only what makes it valid: motion craft, composition numbers,
 // the defaults that make a film read as generated, and what survives compression.
 function designText(lib) {
   return [
-    readSection(lib, 'hyperframes', 'references/motion.md', 'motion-craft'),
-    readSection(lib, 'hyperframes', 'references/spec.md', 'composition-numbers'),
-    readSection(lib, 'hyperframes', 'references/spec.md', 'banned-by-default'),
-    readSection(lib, 'hyperframes', 'references/look.md', 'video-facts'),
-  ].filter(Boolean).join('\n\n');
+    requireSection(lib, 'hyperframes', 'references/motion.md', 'motion-craft'),
+    requireSection(lib, 'hyperframes', 'references/spec.md', 'composition-numbers'),
+    requireSection(lib, 'hyperframes', 'references/spec.md', 'banned-by-default'),
+    requireSection(lib, 'hyperframes', 'references/look.md', 'video-facts'),
+  ].join('\n\n');
 }
 
 // The system prompt is the same for every scene (and every film), so providers that cache a repeated
@@ -33,7 +34,7 @@ function designText(lib) {
 const systemCache = new WeakMap();
 function sceneSystem(lib) {
   if (systemCache.has(lib)) return systemCache.get(lib);
-  const text = `You write ONE HyperFrames scene file (a sub-composition). Reply with JSON only: {"html": "<the whole file>"}.
+  const text = `You write ONE HyperFrames scene file (a sub-composition). Reply with the whole file in a single \`\`\`html code block, and nothing after it.
 
 The file must follow the contract below exactly:
 - Everything inside one <template>. Its root element is <div id="root" data-composition-id="<scene id>">. Style the root as #root (never by class) and give it position:absolute; inset:0.
@@ -111,12 +112,32 @@ export function staticProblems(html, id, duration) {
   return p;
 }
 
+// The scene file from a reply: the ```html block we ask for, else the older {"html": "…"} JSON shape,
+// else a bare <template>…</template>. Code is never asked for inside a JSON string: escaping a whole
+// HTML+JS file there is where long replies break.
+export function extractHtml(text) {
+  const s = String(text ?? '').trim();
+  const fromJson = (t) => {
+    const v = parseModelJson(t);
+    return typeof v?.html === 'string' && v.html.trim() ? v.html.trim() : null;
+  };
+  for (const [, body] of s.matchAll(/```[\w-]*[ \t]*\r?\n([\s\S]*?)```/g)) {
+    const b = body.trim();
+    if (b.startsWith('{')) {
+      const html = fromJson(b);
+      if (html) return html;
+    } else if (/<template[\s>]/.test(b)) return b;
+  }
+  if (s.startsWith('{')) return fromJson(s);
+  const a = s.indexOf('<template');
+  const z = s.lastIndexOf('</template>');
+  return a >= 0 && z > a ? s.slice(a, z + '</template>'.length) : null;
+}
+
 export async function writeScene(scene, ctx, { problems = null, current = null } = {}) {
   const { system, user } = scenePacket(scene, ctx);
-  const repair = problems ? `\n\n<problems>\n${problems.map((x) => `- ${x}`).join('\n')}\n</problems>\n\n<current-file>\n${current}\n</current-file>\n\nFix every problem and reply with the whole corrected file.` : '';
-  const reply = await ctx.ask(system, user + repair, { label: `${problems ? 'repair' : 'write'} ${scene.id}` });
-  const html = typeof reply?.html === 'string' ? reply.html.trim() : null;
-  return html;
+  const repair = problems ? `\n\n<problems>\n${problems.map((x) => `- ${x}`).join('\n')}\n</problems>\n\n<current-file>\n${current}\n</current-file>\n\nFix every problem and reply with the whole corrected file in one \`\`\`html block.` : '';
+  return ctx.ask(system, user + repair, { label: `${problems ? 'repair' : 'write'} ${scene.id}`, parse: extractHtml });
 }
 
 export function findingsFor(check, file) {

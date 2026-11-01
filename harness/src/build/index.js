@@ -37,14 +37,15 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
   const emit = (type, data = {}) => onEvent({ type, ...data });
   const t0 = Date.now();
 
-  // Every model call goes through here: token cap, JSON-only replies, usage.
-  const ask = async (system, user, { label }) => {
+  // Every model call goes through here: token cap, the reply parsed to its shape (JSON unless parse says
+  // otherwise), usage, and the calls/ archive.
+  const ask = async (system, user, { label, parse }) => {
     if (usage.input + usage.output >= maxTokens) {
       emit('cap', { label, used: usage.input + usage.output, maxTokens });
       return null;
     }
     const [inBefore, outBefore] = [usage.input, usage.output];
-    const out = await askJson(provider, system, user, usage, { signal }).catch((err) => {
+    const out = await askJson(provider, system, user, usage, { signal, parse, label, log: (call) => ws.logCall(call) }).catch((err) => {
       if (signal?.aborted) throw err;
       emit('error', { label, error: err.message });
       return null;
@@ -53,6 +54,16 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
     emit('call', { label, tokens: input + output, input, output });
     return out;
   };
+
+  // The look step judges pixels, so it runs on the critic's provider: CRITIC can be a vision model while a
+  // cheaper text model writes the scenes. Say up front when it can't see, rather than skip it quietly.
+  const looker = look ? lookProvider() : null;
+  if (looker && (looker.error || !looker.vision)) {
+    report.warnings.push(looker.error
+      ? `look step skipped: ${looker.error}`
+      : `look step skipped: ${looker.name}/${looker.model} cannot see images. Set CRITIC to a provider with vision (or ${looker.name.toUpperCase()}_VISION=true if this model accepts images).`);
+    emit('warning', { message: report.warnings.at(-1) });
+  }
 
   await ensureBrowser();
   ws.setState({ stage: 'building' });
@@ -82,6 +93,11 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
       emit('scene', { id: s.id, step: 'write' });
       let html = await writeScene(s, ctx);
       report.scenes[s.id].attempts++;
+      if (!html) { // nothing usable came back (cut off, refused, no file in it): one fresh try before a fallback
+        emit('scene', { id: s.id, step: 'write again', problems: ['no scene file in the reply'] });
+        html = await writeScene(s, ctx);
+        report.scenes[s.id].attempts++;
+      }
       let problems = html ? staticProblems(html, s.id, s.duration) : ['no html in the reply'];
       if (problems.length && html) {
         emit('scene', { id: s.id, step: 'repair', problems });
@@ -164,7 +180,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
   // 5. Look (optional): one vision call over the contact sheet; write-mode scenes get one repair.
   if (look) {
     step('look');
-    report.look = await lookAtFilm(ws, plan, scenes, provider, usage, maxTokens, emit);
+    report.look = await lookAtFilm(ws, plan, scenes, looker, usage, maxTokens, emit);
     const toFix = (report.look?.issues ?? []).map((i) => ({ i, s: scenes.find((x) => x.id === i.scene && x.mode === 'write') })).filter((x) => x.s);
     const before = new Map();
     await inBatches(toFix, PARALLEL, async ({ i, s }) => {
@@ -223,15 +239,26 @@ async function measure(ws, plan, scenes) {
   }
   const targets = scenes.filter((s) => !['background', 'transition'].includes(s.layer) && (s.text ?? []).some((t) => String(t).trim()));
   if (!targets.length) return issues;
+  // The last moment is what the viewer is left with: a written last scene must not empty the frame before
+  // the film ends, unless its plan asks to end on an empty frame.
+  const film = plan.format.duration;
+  const last = scenes.filter((s) => s.layer === 'main').reduce((a, s) => (!a || s.start + s.duration > a.start + a.duration ? s : a), null);
+  const endAt = +(film - 0.25).toFixed(2);
+  const checkEnd = last?.mode === 'write' && targets.includes(last) && Math.abs(last.start + last.duration - film) < 0.05 && endAt > last.start
+    && !/fades? (out )?to (black|empty|nothing|the ground)|ends? (on|with) an? empty/i.test(`${last.motion ?? ''} ${last.build ?? ''}`);
   // Sample late in each scene, after entrances, before any exit.
   const at = targets.map((s) => +(s.start + s.duration * 0.6).toFixed(2));
-  const res = await hfJson(ws, ['snapshot', '--at', at.join(','), '--no-end'], { timeoutSec: config.commandTimeoutSec });
+  const res = await hfJson(ws, ['snapshot', '--at', [...at, ...(checkEnd ? [endAt] : [])].join(','), '--no-end'], { timeoutSec: config.commandTimeoutSec });
   const byTime = new Map((res.json?.frames ?? []).map((f) => [Number(f.time), f.path]));
   for (const [i, s] of targets.entries()) {
     const file = byTime.get(at[i]);
     if (!file) continue;
     const spread = await lumaSpread(ws, file, s);
     if (spread != null && spread < 4) issues.push({ id: s.id, problem: `at t=${at[i]}s the ${s.layer === 'overlay' ? 'overlay band' : 'frame'} is blank (luma spread ${spread}); its copy should be visible` });
+  }
+  if (checkEnd && byTime.has(endAt)) {
+    const spread = await lumaSpread(ws, byTime.get(endAt), last);
+    if (spread != null && spread < 4) issues.push({ id: last.id, problem: `the film is blank at t=${endAt}s, just before it ends: the copy leaves too early. Keep it on screen until the scene's last 0.3 s` });
   }
   return issues;
 }
@@ -276,8 +303,17 @@ async function lumaSpread(ws, file, scene) {
 
 const LOOK_SYSTEM = `You review frames of a short video against its plan. The contact sheet shows frames from each scene. For each scene, report only real visible defects: text too small to read or cut off, text overlapping, wrong colours for the plan, empty or broken frames, demo/placeholder content, layout far from the plan. Reply with JSON only: {"issues":[{"scene":"<scene id>","problem":"what is visibly wrong","fix":"one concrete instruction"}]} — an empty list if it looks right.`;
 
+function lookProvider() {
+  try {
+    return providerForRole('critic');
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
 async function lookAtFilm(ws, plan, scenes, provider, usage, maxTokens, emit) {
-  if (!provider.vision) return { skipped: 'model has no vision' };
+  if (provider.error) return { skipped: provider.error };
+  if (!provider.vision) return { skipped: `${provider.name}/${provider.model} cannot see images; set CRITIC to a provider with vision` };
   if (usage.input + usage.output >= maxTokens) return { skipped: 'token cap' };
   // After entrances and reveals have finished (a frame mid-reveal reads as half-typed text).
   const shown = scenes.filter((s) => !['background', 'transition'].includes(s.layer));
@@ -287,10 +323,12 @@ async function lookAtFilm(ws, plan, scenes, provider, usage, maxTokens, emit) {
   if (!sheet) return { skipped: 'no contact sheet' };
   const img = await imageMessage(provider, 'Contact sheet, frames in scene order:', [sheet]);
   const planText = JSON.stringify(shown.map((s) => ({ scene: s.id, at: lookTime(s), copy: s.text, build: s.build })), null, 1);
-  const { message, usage: u } = await chat(provider, [{ role: 'system', content: LOOK_SYSTEM }, { role: 'user', content: planText }, img].filter(Boolean), null);
+  const started = Date.now();
+  const { message, finish, usage: u } = await chat(provider, [{ role: 'system', content: LOOK_SYSTEM }, { role: 'user', content: planText }, img].filter(Boolean), null);
   usage.input += u.input;
   usage.output += u.output;
   usage.calls += 1;
+  ws.logCall({ label: 'look', provider: `${provider.name}/${provider.model}`, at: new Date(started).toISOString(), seconds: +((Date.now() - started) / 1000).toFixed(1), finish, usage: u, system: LOOK_SYSTEM, user: planText, image: sheet, reply: message.content ?? '' });
   const out = parseModelJson(message.content ?? '') ?? { issues: [] };
   emit('look', { issues: out.issues ?? [] });
   return out;

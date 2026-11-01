@@ -44,6 +44,52 @@ function compact(messages, ctx, keepRecent = 8) {
 
 const strip = (messages) => messages.map(({ _stub, _skillKey, ...m }) => m);
 
+// Tool arguments are checked against the tool's own schema before anything runs: not every provider
+// enforces schemas, and a missing argument used to reach the tool as "undefined". Lossless mix-ups are
+// fixed in place (2 ↔ "2", "true" → true), unknown keys are dropped where the schema forbids them, and
+// what is still wrong comes back as one precise list.
+export function checkArgs(schema, args) {
+  const errors = [];
+  const kind = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v);
+  const fits = (v, t) => (t === 'integer' ? Number.isInteger(v) : t === kind(v));
+  const coerce = (v, types) => {
+    if (types.includes('string') && ['number', 'boolean'].includes(typeof v)) return String(v);
+    const n = typeof v === 'string' && v.trim() ? Number(v) : NaN;
+    if (types.includes('integer') && Number.isInteger(n)) return n;
+    if (types.includes('number') && Number.isFinite(n)) return n;
+    if (types.includes('boolean') && (v === 'true' || v === 'false')) return v === 'true';
+    return undefined;
+  };
+  const visit = (s, v, at) => {
+    if (!s || typeof s !== 'object' || v === undefined) return v;
+    const types = [].concat(s.type ?? []);
+    if (types.length && !types.some((t) => fits(v, t))) {
+      const fixed = coerce(v, types);
+      if (fixed === undefined) {
+        errors.push(`${at} must be ${types.join(' or ')}, not ${kind(v)}`);
+        return v;
+      }
+      v = fixed;
+    }
+    if (s.enum && !s.enum.includes(v)) {
+      errors.push(`${at} must be one of ${s.enum.map((x) => JSON.stringify(x)).join(', ')}`);
+      return v;
+    }
+    if (kind(v) === 'object') {
+      for (const k of s.required ?? []) if (v[k] === undefined) errors.push(`${at}.${k} is required`);
+      for (const k of Object.keys(v)) {
+        const sub = s.properties?.[k] ?? (typeof s.additionalProperties === 'object' ? s.additionalProperties : null);
+        if (sub) v[k] = visit(sub, v[k], `${at}.${k}`);
+        else if (s.properties && s.additionalProperties === false) delete v[k];
+      }
+    }
+    if (Array.isArray(v) && s.items) for (let i = 0; i < v.length; i++) v[i] = visit(s.items, v[i], `${at}[${i}]`);
+    return v;
+  };
+  visit(schema, args, 'args');
+  return errors.slice(0, 8);
+}
+
 /**
  * Run one subagent to completion.
  * @param {object} o
@@ -68,6 +114,7 @@ export async function runAgent({ role, system, task, images = [], tools, handoff
   const usage = { input: 0, output: 0, turns: 0 };
   let nudges = 0;
   let rejections = 0;
+  let maxOutputTokens = config.maxOutputTokens;
 
   ctx.emit('agent_start', { role, provider: provider.name, model: provider.model, skillBudget: ctx.skillBudget?.left ?? null });
 
@@ -77,11 +124,20 @@ export async function runAgent({ role, system, task, images = [], tools, handoff
     const lastTurns = maxTurns - turn;
     if (lastTurns === 3) messages.push({ role: 'user', content: `Three turns left. Finish what is essential, then call ${handoff.name}.` });
 
-    const { message, usage: u } = await chatFiltered(provider, messages, toolDefs, { signal, ctx, role });
+    const { message, finish, usage: u } = await chatFiltered(provider, messages, toolDefs, { signal, ctx, role, maxOutputTokens });
     usage.input += u.input;
     usage.output += u.output;
     usage.turns = turn;
     ctx.emit('turn', { role, turn, input: u.input, output: u.output });
+    // A reply cut off at the output limit carries half-written tool calls: run none of them. Give the model
+    // more room (thinking models spend much of the limit thinking) and ask for smaller pieces.
+    if (finish === 'length') {
+      maxOutputTokens = Math.min(64_000, maxOutputTokens * 2);
+      ctx.emit('cut_off', { role, turn, maxOutputTokens });
+      messages.push({ role: 'assistant', content: message.content?.trim() || '(reply cut off)' });
+      messages.push({ role: 'user', content: 'Your last reply was cut off at the output limit before it finished, so none of its tool calls ran. Do that step again, and write a big file in parts: write_file a short first part, then add to it with edit_file.' });
+      continue;
+    }
     const assistant = { role: 'assistant', content: message.content ?? '' };
     if (message.tool_calls?.length) assistant.tool_calls = message.tool_calls;
     messages.push(assistant);
@@ -109,6 +165,15 @@ export async function runAgent({ role, system, task, images = [], tools, handoff
         messages.push({ role: 'tool', tool_call_id: call.id, content: 'Arguments were not valid JSON. Send them again.' });
         continue;
       }
+      const argErrors = checkArgs((name === handoff.name ? handoff : byName.get(name))?.parameters, args);
+      if (argErrors.length) {
+        const why = `${name} arguments do not match its schema: ${argErrors.join('; ')}`;
+        ctx.emit(name === handoff.name ? 'handoff_rejected' : 'tool', name === handoff.name
+          ? { role, name, attempt: rejections, reason: why }
+          : { role, turn, name, args: summarizeArgs(args), ms: 0, chars: why.length, preview: why });
+        messages.push({ role: 'tool', tool_call_id: call.id, content: `Refused: ${why}. Send the call again with them fixed.` });
+        continue;
+      }
 
       // Mandatory reading: no writes and no hand-off until the role's required sections are read.
       // Installed registry items count too: their docs say which variables carry demo content.
@@ -127,7 +192,12 @@ export async function runAgent({ role, system, task, images = [], tools, handoff
       }
 
       if (name === handoff.name) {
-        const problem = (await handoff.validate?.(args, ctx)) ?? null;
+        let problem;
+        try {
+          problem = (await handoff.validate?.(args, ctx)) ?? null;
+        } catch (err) { // a hand-off the checks choke on is the model's to fix, not a crash of the job
+          problem = `the hand-off could not be checked (${err.message}); send it again, complete`;
+        }
         if (problem && ++rejections <= (handoff.maxRejections ?? 4)) {
           ctx.emit('handoff_rejected', { role, name, attempt: rejections, reason: problem.slice(0, 3000) });
           messages.push({ role: 'tool', tool_call_id: call.id, content: `Hand-off rejected: ${problem}` });
@@ -177,15 +247,16 @@ export async function runAgent({ role, system, task, images = [], tools, handoff
 // Recover instead of failing the job: retry, then withhold recent tool output, then a fallback provider.
 const isFiltered = (err) => err?.status === 400 && /flagged|content.?filter|usage policy|content_policy|ResponsibleAI/i.test(err?.message ?? '');
 
-async function chatFiltered(provider, messages, toolDefs, { signal, ctx, role }) {
+async function chatFiltered(provider, messages, toolDefs, { signal, ctx, role, maxOutputTokens }) {
+  const opts = { signal, maxOutputTokens };
   try {
-    return await chat(provider, strip(messages), toolDefs, { signal });
+    return await chat(provider, strip(messages), toolDefs, opts);
   } catch (err) {
     if (!isFiltered(err)) throw err;
     ctx.emit('content_filter', { role, step: 'retry' });
   }
   try {
-    return await chat(provider, strip(messages), toolDefs, { signal });
+    return await chat(provider, strip(messages), toolDefs, opts);
   } catch (err) {
     if (!isFiltered(err)) throw err;
   }
@@ -201,14 +272,14 @@ async function chatFiltered(provider, messages, toolDefs, { signal, ctx, role })
   }
   ctx.emit('content_filter', { role, step: 'withheld', count: withheld });
   try {
-    return await chat(provider, strip(messages), toolDefs, { signal });
+    return await chat(provider, strip(messages), toolDefs, opts);
   } catch (err) {
     if (!isFiltered(err) || !config.fallbackProvider) throw err;
   }
   const fb = { name: config.fallbackProvider, ...config.providers[config.fallbackProvider] };
   if (!fb.apiKey) throw new Error(`Content filter blocked ${role}, and fallback provider "${fb.name}" has no API key`);
   ctx.emit('content_filter', { role, step: 'fallback', provider: fb.name });
-  return chat(fb, strip(messages), toolDefs, { signal });
+  return chat(fb, strip(messages), toolDefs, opts);
 }
 
 function summarizeArgs(args) {

@@ -70,4 +70,21 @@ export class Workspace {
     this.writeJson('state.json', next);
     return next;
   }
+
+  // Every model call of the plan and build steps, to see exactly what a model was asked and answered, or
+  // to replay one call with a changed prompt: calls/NNN-<label>.json, each distinct system prompt stored
+  // once beside them. A log write must never break the job.
+  logCall({ label = 'call', system = '', ...rest }) {
+    try {
+      const dir = this.meta('calls');
+      fs.mkdirSync(dir, { recursive: true });
+      const sys = `system-${crypto.createHash('sha1').update(system).digest('hex').slice(0, 10)}.md`;
+      if (!fs.existsSync(path.join(dir, sys))) fs.writeFileSync(path.join(dir, sys), system);
+      const n = fs.readdirSync(dir).filter((f) => /^\d+-/.test(f)).length + 1;
+      const name = `${String(n).padStart(3, '0')}-${String(label).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60)}.json`;
+      fs.writeFileSync(path.join(dir, name), `${JSON.stringify({ label, system: sys, ...rest }, null, 2)}\n`);
+    } catch {
+      /* the archive is for people; the film goes on without it */
+    }
+  }
 }

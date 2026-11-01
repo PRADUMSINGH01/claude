@@ -54,6 +54,8 @@ export function consoleLines(ev) {
     case 'render_done': return [`● render ${ev.ok ? 'ok' : `FAILED (exit ${ev.code})`}`];
     case 'job_done': return [`✔ ${ev.ok ? 'done' : 'rendered, but verification failed'}: ${ev.video ?? ''} (${ev.duration ?? '?'}s)`];
     case 'job_failed': return [`✖ failed: ${ev.error}`];
+    case 'warning': return [`⚠ ${ev.message}`];
+    case 'cut_off': return [`${t}  ✂ ${ev.role}'s reply was cut off at the output limit; its tool calls were not run (limit now ${ev.maxOutputTokens})`];
     default: return [];
   }
 }

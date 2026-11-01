@@ -543,6 +543,10 @@ function formatLogLine(ev) {
       return (ev.issues || []).length ? `measured: ${ev.issues.map((i) => `${i.id}: ${i.problem}`).join(' | ').slice(0, 300)}` : 'measured checks pass';
     case 'error':
       return `${ev.label || 'error'}: ${ev.error || ''}`;
+    case 'warning':
+      return `Warning: ${ev.message || ''}`;
+    case 'cut_off':
+      return `${role}reply cut off at the output limit; retrying with ${ev.maxOutputTokens} tokens`;
     case 'job_done':
       return `Job done in ${ev.duration || '?'}s`;
     case 'job_failed':

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { config, providerForRole } from './config.js';
 import { chat } from './llm.js';
 import { SkillLibrary } from './skills/library.js';
-import { readSection } from './tools/skill-tools.js';
+import { requireSection } from './tools/skill-tools.js';
 import { catalogSearch, inspectItem, listThemes } from './tools/registry-tools.js';
 import { opaqueOverBackground, plannerHandoff } from './roles/planner.js';
 import { Workspace } from './workspace.js';
@@ -143,13 +143,16 @@ export function storyApplies(brief, prompt) {
   return { applies: true };
 }
 
-function storyGuides(lib, brief) {
+export function storyGuides(lib, brief) {
   const whole = (rel) => {
     const f = lib.file('hyperframes', rel);
     return f ? fs.readFileSync(f.abs, 'utf8').trim() : '';
   };
   const types = [TYPE_FILES[brief.kind], brief.format?.height > brief.format?.width && brief.kind !== 'vertical' ? 'vertical' : null].filter(Boolean);
-  return { story: whole('references/story.md'), types: types.map((t) => whole(`references/types/${t}.md`)).filter(Boolean).join('\n\n') };
+  // The story guide is the whole point of this step; a film type without its own guide is fine.
+  const story = whole('references/story.md');
+  if (!story) throw new Error('Skill file missing: hyperframes/references/story.md. The installed skills changed; point the harness at its new place.');
+  return { story, types: types.map((t) => whole(`references/types/${t}.md`)).filter(Boolean).join('\n\n') };
 }
 
 const STORY_SHAPE = `{
@@ -211,11 +214,11 @@ function storyProblems(story, brief, prompt, options) {
 async function storyPass(askP, lib, brief, request, prompt, options, onEvent) {
   const system = storySystem(storyGuides(lib, brief));
   const input = `${request}\n\n<brief>\n${JSON.stringify(brief, null, 1)}\n</brief>`;
-  let story = await askP(system, input);
+  let story = await askP(system, input, 'story');
   let errs = storyProblems(story, brief, prompt, options);
   if (errs.length) {
     onEvent({ type: 'repair', step: 'story', errors: errs });
-    story = await askP(system, `${input}\n\nYour previous reply had these problems; fix them and reply with the whole JSON:\n- ${errs.join('\n- ')}\n\nPrevious reply:\n${JSON.stringify(story)}`);
+    story = await askP(system, `${input}\n\nYour previous reply had these problems; fix them and reply with the whole JSON:\n- ${errs.join('\n- ')}\n\nPrevious reply:\n${JSON.stringify(story)}`, 'story repair');
     errs = storyProblems(story, brief, prompt, options);
   }
   return { story, errs };
@@ -306,9 +309,9 @@ const PLAN_SHAPE = `{
   "decisions": ["choices you made"]
 }`;
 
-function planSystem(lib) {
-  const template = readSection(lib, 'hyperframes', 'references/spec.md', 'the-template') ?? '';
-  const lookLine = readSection(lib, 'hyperframes', 'references/look.md', 'the-look-line') ?? '';
+export function planSystem(lib) {
+  const template = requireSection(lib, 'hyperframes', 'references/spec.md', 'the-template');
+  const lookLine = requireSection(lib, 'hyperframes', 'references/look.md', 'the-look-line');
   return `You plan a HyperFrames video from a brief and a shortlist of registry blocks. Reply with JSON only, in this shape:
 ${PLAN_SHAPE}
 Rules:
@@ -484,7 +487,7 @@ const JUDGE_SYSTEM = `You review every scene of a video plan. A scene uses a reg
 - motion_matches: true if the plan's motion/build describe what the used items actually do (hand-built: plausible from its build); false if it invents effects they do not have.
 Reply with JSON only, one entry per scene id: {"scenes":[{"id":"","fit":1,"motion_matches":true,"why":"one short sentence"}]}`;
 
-async function judgePlan(provider, plan, brief, lists, usage, prompt) {
+async function judgePlan(provider, plan, brief, lists, usage, prompt, opts) {
   const info = Object.fromEntries(allItems(lists).map((i) => [i.name, i]));
   const holders = [...brief.beats, ...(brief.overlays ?? []), ...(brief.transitions ?? []).map((x) => ({ id: x.id, intent: `${x.kind} transition: ${x.style}` }))];
   const rows = plan.scenes.map((s) => {
@@ -501,29 +504,33 @@ async function judgePlan(provider, plan, brief, lists, usage, prompt) {
   return ask(provider, JUDGE_SYSTEM, `${JSON.stringify(film, null, 1)}
 
 Scenes:
-${JSON.stringify(rows, null, 1)}`, usage);
+${JSON.stringify(rows, null, 1)}`, usage, { ...opts, label: 'judge' });
 }
 
 // ---- Pipeline ----------------------------------------------------------------------
 
-export async function ask(provider, system, user, usage, { signal } = {}) {
+// One model call that must answer in a set shape: parse turns the reply into a value, or null.
+// log (optional) receives every call, cut-off retries included, for the job's calls/ archive.
+export async function ask(provider, system, user, usage, { signal, parse = parseModelJson, label = 'ask', log } = {}) {
   const messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
   let max = config.maxOutputTokens;
   for (let attempt = 0; ; attempt++) {
     signal?.throwIfAborted();
+    const started = Date.now();
     const { message, finish, usage: u } = await chat(provider, messages, null, { maxOutputTokens: max, signal });
     usage.input += u.input;
     usage.output += u.output;
     usage.calls += 1;
-    // Reasoning models spend output tokens thinking; a reply cut off mid-JSON gets one retry with more room.
+    const raw = message.content ?? '';
+    log?.({ label, provider: `${provider.name}/${provider.model}`, at: new Date(started).toISOString(), seconds: +((Date.now() - started) / 1000).toFixed(1), finish, maxOutputTokens: max, usage: u, system, user, reply: raw });
+    // Reasoning models spend output tokens thinking; a reply cut off mid-answer gets one retry with more room.
     if (finish === 'length' && attempt === 0 && max < 64_000) {
       console.error(`[plan] ${provider.name} reply was cut off at ${max} output tokens; retrying with ${max * 2}`);
       max *= 2;
       continue;
     }
-    const raw = message.content ?? '';
     usage.lastRaw = raw;
-    return parseModelJson(raw);
+    return parse(raw);
   }
 }
 
@@ -597,17 +604,18 @@ export async function runPlan({ prompt, options = {}, onEvent = () => {}, jobsDi
   const prior = ws.readJson('request.json', {});
   ws.writeJson('request.json', { ...prior, prompt, options, createdAt: prior.createdAt ?? new Date().toISOString(), mode });
   onEvent({ type: 'job_start', job: ws.id, dir: ws.dir, resume: Boolean(dir) });
-  const askP = (system, user) => ask(provider, system, user, usage, { signal });
+  const log = (call) => ws.logCall(call);
+  const askP = (system, user, label) => ask(provider, system, user, usage, { signal, label, log });
   const request = `${prompt}${settingsText(options)}`;
   const briefProblems = (b) => (Array.isArray(b?.beats) ? [...checkBrief(b, prompt, options), ...checkSettings(b, options)] : ['reply was not a brief object with beats[] (cut off or invalid JSON)']);
 
   // 1. Understand
   onEvent({ type: 'step', step: 'understand', provider: `${provider.name}/${provider.model}` });
-  let brief = await askP(UNDERSTAND_SYSTEM, request);
+  let brief = await askP(UNDERSTAND_SYSTEM, request, 'understand');
   let briefErrs = briefProblems(brief);
   if (briefErrs.length) {
     onEvent({ type: 'repair', step: 'understand', errors: briefErrs });
-    brief = await askP(UNDERSTAND_SYSTEM, `${request}\n\nYour previous brief had these problems; fix them:\n- ${briefErrs.join('\n- ')}\n\nPrevious brief:\n${JSON.stringify(brief)}`);
+    brief = await askP(UNDERSTAND_SYSTEM, `${request}\n\nYour previous brief had these problems; fix them:\n- ${briefErrs.join('\n- ')}\n\nPrevious brief:\n${JSON.stringify(brief)}`, 'understand repair');
     briefErrs = briefProblems(brief);
   }
   if (!Array.isArray(brief?.beats)) {
@@ -658,11 +666,11 @@ export async function runPlan({ prompt, options = {}, onEvent = () => {}, jobsDi
     const errs = [await plannerHandoff.validate(p, ctx), ...planChecks(p, brief, lists)].filter(Boolean);
     return errs.length ? errs.join('\n') : null;
   };
-  let plan = await askP(system, input);
+  let plan = await askP(system, input, 'plan');
   let problems = await validate(plan);
   if (problems) {
     onEvent({ type: 'repair', step: 'plan', errors: problems.split('\n') });
-    plan = await askP(system, `${input}\n\nYour previous plan had these problems; fix them and reply with the whole plan:\n${problems}\n\nPrevious plan:\n${JSON.stringify(plan)}`, usage);
+    plan = await askP(system, `${input}\n\nYour previous plan had these problems; fix them and reply with the whole plan:\n${problems}\n\nPrevious plan:\n${JSON.stringify(plan)}`, 'plan repair');
     problems = await validate(plan);
   }
   if (!Array.isArray(plan?.scenes)) {
@@ -673,7 +681,7 @@ export async function runPlan({ prompt, options = {}, onEvent = () => {}, jobsDi
 
   // 4. Rate (code)
   if (withJudge) onEvent({ type: 'step', step: 'judge' });
-  const judge = withJudge ? await judgePlan(provider, plan, brief, lists, usage, prompt).catch(() => null) : null;
+  const judge = withJudge ? await judgePlan(provider, plan, brief, lists, usage, prompt, { signal, log }).catch(() => null) : null;
   ws.writeJson('judge.json', judge);
   const rating = ratePlan(plan, brief, problems, { lists, judge });
   ws.writeJson('rating.json', rating);

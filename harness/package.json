@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "hyperframes": "0.8.211",
-    "openai": "^7.45.1"
+    "openai": "^7.45.1",
+    "undici": "^8.12.3"
   }
 }

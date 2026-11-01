@@ -2,9 +2,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import OpenAI, { APIConnectionError } from 'openai';
+import { Agent, fetch as undiciFetch } from 'undici';
 import { config } from './config.js';
 
 const clients = new Map();
+
+// Reasoning models (GLM thinking, xhigh effort) can take many minutes before the first response
+// byte; Node's undici default kills the request at ~300s waiting for headers. Give every provider
+// call a dispatcher whose header/body timeouts match the SDK's own.
+const dispatcher = new Agent({
+  headersTimeout: config.requestTimeoutSec * 1000 + 60_000,
+  bodyTimeout: config.requestTimeoutSec * 1000 + 60_000,
+});
+const longFetch = (url, init = {}) => undiciFetch(url, { ...init, dispatcher });
 
 function client(p) {
   const key = `${p.name}|${p.baseURL}`;
@@ -12,6 +22,7 @@ function client(p) {
     clients.set(key, new OpenAI({
       apiKey: p.apiKey,
       baseURL: p.baseURL,
+      fetch: longFetch,
       // Azure's v1 endpoint authenticates with api-key; harmless elsewhere.
       defaultHeaders: p.kind === 'azure' ? { 'api-key': p.apiKey } : undefined,
       maxRetries: 0,

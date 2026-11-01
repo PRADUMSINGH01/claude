@@ -135,7 +135,29 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
   // 4. Verify the film: check + measured. Readability problems count even when check calls them warnings.
   //    A written scene with issues gets one repair; a mounted/block scene is escalated to the writer once.
   step('verify film');
-  const issues = await measure(ws, plan, scenes);
+  let issues = await measure(ws, plan, scenes);
+  // A block or mounted item whose only problem is its size is scaled in code; a written scene is told to.
+  const scaled = [];
+  for (const s of scenes.filter((x) => x.mode !== 'write')) {
+    const mine = issues.filter((i) => i.id === s.id);
+    const fit = mine.length === 1 && mine[0].kind === 'small' ? fitScale(mine[0].ink) : null;
+    if (!fit) continue;
+    s.scale = fit;
+    scaled.push(s);
+    issues = issues.filter((i) => i !== mine[0]);
+  }
+  if (scaled.length) {
+    rewriteIndex();
+    const after = findingsFor(await runCheck(ws), 'index.html').filter((f) => f.startsWith('[error]'));
+    if (after.length) { // the runtime refused the transform: keep the film valid
+      for (const s of scaled) delete s.scale;
+      rewriteIndex();
+      report.warnings.push(`scaling ${scaled.map((s) => s.id).join(', ')} broke check (${after[0]}); left at their own size`);
+    } else {
+      for (const s of scaled) report.warnings.push(`${s.id}: ${s.item} drew its copy too small; its host is scaled ${s.scale.k}x around the copy`);
+      emit('scaled', { scenes: scaled.map((s) => ({ id: s.id, k: s.scale.k })) });
+    }
+  }
   const check = await runCheck(ws);
   const MUST_FIX = /^\[error\]|text_below_floor|contrast|offscreen|clipped|overflow|cut_off/;
   for (const s of scenes) {
@@ -193,7 +215,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
       const c = await runCheck(ws);
       const blank = await measure(ws, plan, toFix.map(({ s }) => s));
       for (const { s } of toFix) {
-        const broke = findingsFor(c, s.file).some((f) => f.startsWith('[error]')) || blank.some((b) => b.id === s.id);
+        const broke = findingsFor(c, s.file).some((f) => f.startsWith('[error]')) || blank.some((b) => b.id === s.id && b.kind !== 'small');
         if (broke) {
           fs.writeFileSync(sceneFile(ws, s), before.get(s.id));
           report.scenes[s.id].lookRepair = 'reverted: the repair broke the scene';
@@ -239,28 +261,82 @@ async function measure(ws, plan, scenes) {
   }
   const targets = scenes.filter((s) => !['background', 'transition'].includes(s.layer) && (s.text ?? []).some((t) => String(t).trim()));
   if (!targets.length) return issues;
-  // The last moment is what the viewer is left with: a written last scene must not empty the frame before
-  // the film ends, unless its plan asks to end on an empty frame.
-  const film = plan.format.duration;
-  const last = scenes.filter((s) => s.layer === 'main').reduce((a, s) => (!a || s.start + s.duration > a.start + a.duration ? s : a), null);
-  const endAt = +(film - 0.25).toFixed(2);
-  const checkEnd = last?.mode === 'write' && targets.includes(last) && Math.abs(last.start + last.duration - film) < 0.05 && endAt > last.start
-    && !/fades? (out )?to (black|empty|nothing|the ground)|ends? (on|with) an? empty/i.test(`${last.motion ?? ''} ${last.build ?? ''}`);
+  // A scene's last moment must still show its copy (an exit may only start in its last 0.3 s), whoever
+  // built it: a written scene or a mounted item that ends early leaves dead air before the cut or the end
+  // of the film. Not where a cover transition hides the cut, nor where the plan asks to end on an empty frame.
+  const covered = (t) => scenes.some((x) => x.layer === 'transition' && t >= x.start && t <= x.start + x.duration);
+  const tailAt = (s) => +(s.start + s.duration - 0.25).toFixed(2);
+  const tails = targets.filter((s) => s.layer === 'main' && s.duration >= 1.2 && !covered(tailAt(s))
+    && !/fades? (out )?to (black|empty|nothing|the ground)|ends? (on|with) an? empty/i.test(`${s.motion ?? ''} ${s.build ?? ''}`));
+  const hasBackground = scenes.some((s) => s.layer === 'background');
   // Sample late in each scene, after entrances, before any exit.
   const at = targets.map((s) => +(s.start + s.duration * 0.6).toFixed(2));
-  const res = await hfJson(ws, ['snapshot', '--at', [...at, ...(checkEnd ? [endAt] : [])].join(','), '--no-end'], { timeoutSec: config.commandTimeoutSec });
+  const res = await hfJson(ws, ['snapshot', '--at', [...new Set([...at, ...tails.map(tailAt)])].join(','), '--no-end'], { timeoutSec: config.commandTimeoutSec });
   const byTime = new Map((res.json?.frames ?? []).map((f) => [Number(f.time), f.path]));
+  const pct = (x) => `${Math.round(x * 100)}%`;
   for (const [i, s] of targets.entries()) {
     const file = byTime.get(at[i]);
     if (!file) continue;
     const spread = await lumaSpread(ws, file, s);
-    if (spread != null && spread < 4) issues.push({ id: s.id, problem: `at t=${at[i]}s the ${s.layer === 'overlay' ? 'overlay band' : 'frame'} is blank (luma spread ${spread}); its copy should be visible` });
+    if (spread != null && spread < 4) {
+      issues.push({ id: s.id, problem: `at t=${at[i]}s the ${s.layer === 'overlay' ? 'overlay band' : 'frame'} is blank (luma spread ${spread}); its copy should be visible` });
+      continue;
+    }
+    // The hero fills at least 40% of the frame's width or height (the scene writer's own rule), measured so
+    // ready-made blocks are held to it too. Not over a background layer, whose texture hides the copy's box.
+    if (s.layer !== 'main' || hasBackground) continue;
+    const ink = await inkBox(ws, file);
+    if (ink && Math.max(ink.w, ink.h) < 0.4) {
+      issues.push({ id: s.id, kind: 'small', ink, problem: `at t=${at[i]}s the copy spans only ${pct(ink.w)} of the frame's width and ${pct(ink.h)} of its height; the hero must fill at least 40% of the width or the height` });
+    }
   }
-  if (checkEnd && byTime.has(endAt)) {
-    const spread = await lumaSpread(ws, byTime.get(endAt), last);
-    if (spread != null && spread < 4) issues.push({ id: last.id, problem: `the film is blank at t=${endAt}s, just before it ends: the copy leaves too early. Keep it on screen until the scene's last 0.3 s` });
+  for (const s of tails) {
+    const file = byTime.get(tailAt(s));
+    const spread = file ? await lumaSpread(ws, file, s) : null;
+    if (spread != null && spread < 4) issues.push({ id: s.id, problem: `the frame is blank at t=${tailAt(s)}s, just before the scene ends at ${+(s.start + s.duration).toFixed(2)}s: the copy leaves too early. Keep it on screen until the scene's last 0.3 s` });
   }
   return issues;
+}
+
+// Where the copy is: the bounding box of every pixel that differs clearly from the ground, as fractions of
+// the frame. The frame is shrunk to 384x216 greys and the most common grey is taken as the ground.
+let inkFiles = 0;
+async function inkBox(ws, file) {
+  const [W, H] = [384, 216];
+  const out = path.join(ws.tmpDir, `ink-${process.pid}-${++inkFiles}.gray`);
+  await run(ws, `ffmpeg -v error -y -i ${quote(file)} -vf "scale=${W}:${H},format=gray" -f rawvideo ${quote(out)}`, { timeoutSec: 60 });
+  let px;
+  try {
+    px = fs.readFileSync(out);
+    fs.rmSync(out, { force: true });
+  } catch {
+    return null;
+  }
+  if (px.length !== W * H) return null;
+  const counts = new Array(256).fill(0);
+  for (const v of px) counts[v]++;
+  const ground = counts.indexOf(Math.max(...counts));
+  let [x1, x2, y1, y2] = [W, -1, H, -1];
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (Math.abs(px[y * W + x] - ground) <= 30) continue;
+      x1 = Math.min(x1, x);
+      x2 = Math.max(x2, x);
+      y1 = Math.min(y1, y);
+      y2 = Math.max(y2, y);
+    }
+  }
+  return x2 < 0 ? null : { x: x1 / W, y: y1 / H, w: (x2 - x1 + 1) / W, h: (y2 - y1 + 1) / H };
+}
+
+// A ready-made block can't be told a size: scale its host around its copy, to about 45% of the frame on the
+// copy's long side, at most 2.5x, and never past the 5% safe margin. Null when it would barely change.
+export function fitScale(ink) {
+  const cx = ink.x + ink.w / 2;
+  const cy = ink.y + ink.h / 2;
+  const room = Math.min((Math.min(cx, 1 - cx) - 0.05) / (ink.w / 2), (Math.min(cy, 1 - cy) - 0.05) / (ink.h / 2));
+  const k = +Math.min(2.5, 0.45 / Math.max(ink.w, ink.h), room).toFixed(2);
+  return k >= 1.15 ? { k, ox: +(cx * 100).toFixed(1), oy: +(cy * 100).toFixed(1) } : null;
 }
 
 const lookTime = (s) => +(s.start + s.duration * 0.9).toFixed(2);

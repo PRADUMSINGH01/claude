@@ -501,6 +501,26 @@ await step('agent loop: a reply cut off at the output limit runs none of its too
   assert.ok(events.some((e) => e.type === 'cut_off'));
 });
 
+await step('ids a model leaves out are filled in code, never "undefined"', async () => {
+  const { fillIds } = await import('../src/plan.js');
+  // What GLM's story step returned: transitions with no id.
+  const b = fillIds({ beats: [{ id: 'three-apps' }, { id: 'The Question' }, {}], transitions: [{ at: 4, kind: 'cover' }, { id: '', at: 8, kind: 'handoff' }] });
+  assert.deepEqual(b.beats.map((x) => x.id), ['three-apps', 'the-question', 'beat-3']);
+  assert.deepEqual(b.transitions.map((x) => x.id), ['t-1', 't-2']);
+  assert.equal(fillIds(null), null);
+});
+
+await step('a block that draws its copy too small is scaled around it, inside the safe margin', async () => {
+  const { fitScale } = await import('../src/build/index.js');
+  // The Kernwerk wordmark: 14% wide, centred → 2.5x (the cap).
+  assert.deepEqual(fitScale({ x: 0.43, y: 0.47, w: 0.14, h: 0.06 }), { k: 2.5, ox: 50, oy: 50 });
+  // Near the left edge: the margin limits the scale, so the copy stays inside 5–95%.
+  assert.deepEqual(fitScale({ x: 0.1, y: 0.45, w: 0.2, h: 0.1 }), { k: 1.5, ox: 20, oy: 50 });
+  assert.equal(fitScale({ x: 0.06, y: 0.45, w: 0.2, h: 0.1 }), null, 'hard against the edge: no room to grow');
+  // Already big enough: left alone.
+  assert.equal(fitScale({ x: 0.25, y: 0.45, w: 0.5, h: 0.1 }), null);
+});
+
 await step('plan and build model calls are archived, each system prompt once', () => {
   ws.logCall({ label: 'write headline', system: 'SYS', user: 'u1', reply: 'r1' });
   ws.logCall({ label: 'repair headline', system: 'SYS', user: 'u2', reply: 'r2' });

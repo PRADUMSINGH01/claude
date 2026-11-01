@@ -168,7 +168,7 @@ export async function assemble(ws, plan, brief, { emit = () => {} } = {}) {
       if (item.ownDuration && s.duration > item.ownDuration + 0.01) {
         const abs = path.join(ws.projectDir, item.file);
         fs.writeFileSync(abs, extendItem(fs.readFileSync(abs, 'utf8'), item.ownDuration, s.duration));
-        warnings.push(`${s.id}: ${item.name} runs ${item.ownDuration}s on its own; extended to ${s.duration}s (it holds or loops past its authored end)`);
+        warnings.push(`${s.id}: ${item.name} runs ${item.ownDuration}s on its own; its host is ${s.duration}s (the film check measures that its copy still shows at the end)`);
         item.ownDuration = s.duration;
       }
     }
@@ -214,7 +214,7 @@ function host(s, format) {
     `      data-track-index="${TRACK[s.layer] ?? 1}"`,
     sized ? `      data-width="${format.width}"\n      data-height="${format.height}"` : null,
     Object.keys(s.values).length ? `      data-variable-values='${attr(JSON.stringify(s.values))}'` : null,
-    `      style="position:absolute;${box}z-index:${(Z[s.layer] ?? 10) + (s.zBoost ?? 0)};"`,
+    `      style="position:absolute;${box}z-index:${(Z[s.layer] ?? 10) + (s.zBoost ?? 0)};${s.scale ? `transform:scale(${s.scale.k});transform-origin:${s.scale.ox}% ${s.scale.oy}%;` : ''}"`,
     '    ></div>',
   ].filter(Boolean).join('\n');
 }

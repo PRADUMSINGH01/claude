@@ -52,6 +52,23 @@ export const readFloor = (copy) => {
   return words ? Math.max(2, 1 + 0.3 * words) : 0;
 };
 
+// Ids are bookkeeping, not judgement: code fills the ones a model leaves out or garbles (beat-2, t-1…), so a
+// missing id never travels on into the plan as "undefined".
+export function fillIds(brief) {
+  const kebab = /^[a-z0-9][a-z0-9-]{0,40}$/;
+  const slug = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+  const used = new Set();
+  for (const [key, prefix] of [['beats', 'beat'], ['overlays', 'overlay'], ['transitions', 't']]) {
+    for (const [i, x] of (Array.isArray(brief?.[key]) ? brief[key] : []).entries()) {
+      if (!x || typeof x !== 'object') continue;
+      let id = kebab.test(String(x.id ?? '')) ? x.id : slug(x.id) || `${prefix}-${i + 1}`;
+      if (used.has(id)) id = `${id}-${i + 1}`;
+      used.add((x.id = id));
+    }
+  }
+  return brief;
+}
+
 export function checkBrief(brief, prompt, options = {}) {
   const errs = [];
   const holders = [...(brief.beats ?? []), ...(brief.overlays ?? [])];
@@ -215,10 +232,12 @@ async function storyPass(askP, lib, brief, request, prompt, options, onEvent) {
   const system = storySystem(storyGuides(lib, brief));
   const input = `${request}\n\n<brief>\n${JSON.stringify(brief, null, 1)}\n</brief>`;
   let story = await askP(system, input, 'story');
+  fillIds(story?.brief);
   let errs = storyProblems(story, brief, prompt, options);
   if (errs.length) {
     onEvent({ type: 'repair', step: 'story', errors: errs });
     story = await askP(system, `${input}\n\nYour previous reply had these problems; fix them and reply with the whole JSON:\n- ${errs.join('\n- ')}\n\nPrevious reply:\n${JSON.stringify(story)}`, 'story repair');
+    fillIds(story?.brief);
     errs = storyProblems(story, brief, prompt, options);
   }
   return { story, errs };
@@ -611,11 +630,12 @@ export async function runPlan({ prompt, options = {}, onEvent = () => {}, jobsDi
 
   // 1. Understand
   onEvent({ type: 'step', step: 'understand', provider: `${provider.name}/${provider.model}` });
-  let brief = await askP(UNDERSTAND_SYSTEM, request, 'understand');
+  let brief = fillIds(await askP(UNDERSTAND_SYSTEM, request, 'understand'));
   let briefErrs = briefProblems(brief);
   if (briefErrs.length) {
     onEvent({ type: 'repair', step: 'understand', errors: briefErrs });
     brief = await askP(UNDERSTAND_SYSTEM, `${request}\n\nYour previous brief had these problems; fix them:\n- ${briefErrs.join('\n- ')}\n\nPrevious brief:\n${JSON.stringify(brief)}`, 'understand repair');
+    fillIds(brief);
     briefErrs = briefProblems(brief);
   }
   if (!Array.isArray(brief?.beats)) {

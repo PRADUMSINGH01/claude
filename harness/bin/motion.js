@@ -79,6 +79,7 @@ function printBuildEvent(ev) {
     case 'cap': return console.log(`  ⛔ token cap reached (${k(ev.used)} of ${k(ev.maxTokens)}): ${ev.label} skipped, fallback used`);
     case 'error': return console.log(`  ✖ ${ev.label}: ${ev.error}`);
     case 'warning': return console.log(`  ⚠ ${ev.message}`);
+    case 'scaled': return console.log(ev.scenes.map((s) => `  ⤢ ${s.id}: copy too small, host scaled ${s.k}x`).join('\n'));
     case 'render_done': return console.log(`  render ${ev.ok ? 'ok' : 'FAILED'}`);
     case 'done': return console.log(`
 ■ done: ${ev.usage.calls} model calls, ${k(ev.usage.input)} in / ${k(ev.usage.output)} out, ${ev.usage.minutes} min

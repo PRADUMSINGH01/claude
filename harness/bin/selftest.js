@@ -531,6 +531,18 @@ await step('JSON replies: JSON mode on OpenAI/Azure, and one fresh ask when a re
   assert.equal(usage.calls, 2);
 });
 
+await step('a scene must show its copy whole as visible text (not only in an attribute or split by a typo)', async () => {
+  const { staticProblems } = await import('../src/build/scenes.js');
+  const ok = '<template><div id="root" data-composition-id="a"><div class="clip" data-start="0" data-duration="2"><span>Slow</span> <span>Mornings</span></div></div><script>window.__timelines["a"] = tl;</script></template>';
+  assert.deepEqual(staticProblems(ok, 'a', 2, ['Slow Mornings']), []);
+  // The real case: the "s" lived only in aria-label.
+  const lost = ok.replace('<span>Slow</span> <span>Mornings</span>', '<div aria-label="Slow Mornings">Slow&nbsp;Mornin<span>g</span></div>');
+  assert.match(staticProblems(lost, 'a', 2, ['Slow Mornings']).join(), /"Slow Mornings" is not in the markup whole/);
+  // Per-letter spans, capitals by CSS and HTML entities still count as the copy.
+  const letters = ok.replace('<span>Slow</span> <span>Mornings</span>', 'SLOW&nbsp;<b>M</b><b>O</b>RNINGS &amp; co');
+  assert.deepEqual(staticProblems(letters, 'a', 2, ['Slow Mornings & co']), []);
+});
+
 await step('ids a model leaves out are filled in code, never "undefined"', async () => {
   const { fillIds } = await import('../src/plan.js');
   // What GLM's story step returned: transitions with no id.

@@ -134,12 +134,12 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
         html = await writeScene(s, ctx);
         report.scenes[s.id].attempts++;
       }
-      let problems = html ? staticProblems(html, s.id, s.duration) : ['no html in the reply'];
+      let problems = html ? staticProblems(html, s.id, s.duration, s.text) : ['no html in the reply'];
       if (problems.length && html) {
         emit('scene', { id: s.id, step: 'repair', problems });
         html = (await writeScene(s, ctx, { problems, current: html })) ?? html;
         report.scenes[s.id].attempts++;
-        problems = staticProblems(html, s.id, s.duration);
+        problems = staticProblems(html, s.id, s.duration, s.text);
       }
       if (html && !problems.length) fs.writeFileSync(sceneFile(ws, s), html);
       else { writeFallback(ws, s, ctx); report.scenes[s.id].result = 'fallback (contract)'; report.scenes[s.id].why = problems; }
@@ -156,7 +156,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
         emit('scene', { id: s.id, step: `repair ${round}`, problems });
         const html = await writeScene(s, ctx, { problems, current: fs.readFileSync(sceneFile(ws, s), 'utf8') });
         report.scenes[s.id].attempts++;
-        if (html && !staticProblems(html, s.id, s.duration).length) fs.writeFileSync(sceneFile(ws, s), html);
+        if (html && !staticProblems(html, s.id, s.duration, s.text).length) fs.writeFileSync(sceneFile(ws, s), html);
       });
       check = null; // the files changed since: check again
     }
@@ -212,7 +212,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
       emit('scene', { id: s.id, step: 'film repair', problems });
       const html = await writeScene(s, ctx, { problems, current: fs.readFileSync(sceneFile(ws, s), 'utf8') });
       report.scenes[s.id].attempts++;
-      if (html && !staticProblems(html, s.id, s.duration).length) fs.writeFileSync(sceneFile(ws, s), html);
+      if (html && !staticProblems(html, s.id, s.duration, s.text).length) fs.writeFileSync(sceneFile(ws, s), html);
     });
     const c = await quickCheck(writtenWithIssues);
     for (const s of writtenWithIssues) if (findingsFor(c, s.file).some((f) => f.startsWith('[error]'))) { writeFallback(ws, s, ctx); report.scenes[s.id].result = 'fallback (film repair broke it)'; }
@@ -248,7 +248,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
       before.set(s.id, fs.readFileSync(sceneFile(ws, s), 'utf8'));
       const html = await writeScene(s, ctx, { problems: [`${i.problem} → ${i.fix}`], current: before.get(s.id) });
       report.scenes[s.id].attempts++;
-      if (html && !staticProblems(html, s.id, s.duration).length) fs.writeFileSync(sceneFile(ws, s), html);
+      if (html && !staticProblems(html, s.id, s.duration, s.text).length) fs.writeFileSync(sceneFile(ws, s), html);
     });
     if (toFix.length) {
       const [c, blank] = await Promise.all([quickCheck(toFix.map(({ s }) => s)), measureFilm(toFix.map(({ s }) => s))]);
@@ -327,6 +327,13 @@ async function measure(ws, plan, scenes, time = (_kind, work) => work) {
       // ready-made blocks are held to it too. Not over a background layer, whose texture hides the copy's box.
       if (s.layer !== 'main' || hasBackground) return;
       const ink = await inkBox(ws, file);
+      // Copy that touches the frame's edge is cut off ("Saturdays. 6 A" in a real run): text belongs in the
+      // central 80%, content in the central 90%.
+      const off = ink && [['left', ink.x], ['right', 1 - ink.x - ink.w], ['top', ink.y], ['bottom', 1 - ink.y - ink.h]].filter(([, gap]) => gap < 0.005).map(([side]) => side);
+      if (off?.length) {
+        issues.push({ id: s.id, problem: `at t=${at[i]}s the copy runs off the frame's ${off.join(' and ')} edge, so it is cut off: keep all text inside the central 80% of the frame` });
+        return;
+      }
       if (ink && Math.max(ink.w, ink.h) < 0.4) {
         issues.push({ id: s.id, kind: 'small', ink, problem: `at t=${at[i]}s the copy spans only ${pct(ink.w)} of the frame's width and ${pct(ink.h)} of its height; the hero must fill at least 40% of the width or the height` });
       }

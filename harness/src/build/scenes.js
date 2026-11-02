@@ -99,8 +99,25 @@ export function scenePacket(scene, ctx) {
 }
 
 // Code checks that need no browser: catch the common contract breaks before running check.
-export function staticProblems(html, id, duration) {
+// The words a viewer can read: markup text without scripts, styles, comments, tags or attributes (an
+// aria-label is not on screen). Compared without spaces or case, since type is often split into per-word or
+// per-letter spans and set in capitals by CSS.
+const ENTITIES = { nbsp: ' ', '#160': ' ', amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", apos: "'", rsquo: "'", lsquo: "'", '#8217': "'", ldquo: '"', rdquo: '"' };
+export const visibleText = (html) => String(html)
+  .replace(/<(script|style)\b[\s\S]*?<\/\1>/gi, ' ')
+  .replace(/<!--[\s\S]*?-->/g, ' ')
+  .replace(/<[^>]+>/g, '')
+  .replace(/&(#?\w+);/g, (m, e) => ENTITIES[e] ?? m);
+const squash = (s) => String(s).toLowerCase().replace(/[’‘]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, '');
+
+export function staticProblems(html, id, duration, copy = []) {
   const p = [];
+  // Copy is the one thing that must be exact. A real run wrote "Mornin<span>g</span>" and kept the "s" only
+  // in an aria-label, so the film said "Slow Morning".
+  const shown = squash(visibleText(html));
+  for (const line of copy.filter((c) => String(c).trim())) {
+    if (!shown.includes(squash(line))) p.push(`the copy "${line}" is not in the markup whole: write it as visible text, every letter, in the HTML (not built by script, not only in an attribute)`);
+  }
   if (!/<template[\s>]/.test(html)) p.push('everything must be inside <template>');
   if (!new RegExp(`<div[^>]*id="root"[^>]*data-composition-id="${id}"|<div[^>]*data-composition-id="${id}"[^>]*id="root"`).test(html)) p.push(`root must be <div id="root" data-composition-id="${id}">`);
   if (!html.includes(`__timelines["${id}"]`)) p.push(`register the timeline: window.__timelines["${id}"] = tl`);

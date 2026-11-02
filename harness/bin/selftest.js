@@ -616,6 +616,22 @@ await step('registry items the request names can be adapted into a hand-built sc
   assert.match(planChecks({ theme: {}, scenes: [{ ...scene, adapt: [], components: ['code-terminal-run'] }] }, brief, sl).join(), /the request names code-typing: use it/, 'a look-alike does not count');
 });
 
+await step('an effort chosen for the run reaches every role, scene writing included', async () => {
+  const { config, providerForRole, useEffort } = await import('../src/config.js');
+  const roles = { ...config.roles };
+  config.providers.fake = { kind: 'openai', apiKey: 'x', baseURL: 'http://127.0.0.1:9/v1/', model: 'fake', effort: '', vision: false };
+  try {
+    for (const r of Object.keys(roles)) config.roles[r] = 'fake';
+    useEffort('low');
+    assert.deepEqual(['planner', 'builder', 'critic', 'fixer'].map((r) => providerForRole(r).effort), ['low', 'low', 'low', 'low']);
+    useEffort('');
+    assert.equal(providerForRole('builder').effort, process.env.BUILDER_EFFORT || 'medium', 'cleared: back to the role default');
+  } finally {
+    useEffort('');
+    Object.assign(config.roles, roles);
+  }
+});
+
 await step('ids a model leaves out are filled in code, never "undefined"', async () => {
   const { fillIds } = await import('../src/plan.js');
   // What GLM's story step returned: transitions with no id.

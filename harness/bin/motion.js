@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
-import { config, providerStatus, useProvider } from '../src/config.js';
+import { config, providerStatus, useEffort, useProvider } from '../src/config.js';
 import { runJob } from '../src/orchestrator.js';
 import { runFilm } from '../src/film.js';
 import { runPlan } from '../src/plan.js';
@@ -23,6 +23,7 @@ const { values, positionals } = parseArgs({
     duration: { type: 'string' },
     jobs: { type: 'string' },
     provider: { type: 'string' },
+    effort: { type: 'string' },
     planner: { type: 'string' },
     builder: { type: 'string' },
     critic: { type: 'string' },
@@ -47,12 +48,14 @@ motion providers                 which AI providers have keys, their models, whi
 motion themes
 motion skills <planner|builder|critic|fixer>
 
-Provider for this run (overrides .env): --provider gemini|openai|claude|azure|glm
-One role only:                           --planner X  --builder X  --critic X  --fixer X`;
+Provider for this run (overrides .env): --provider gemini|openai|claude|azure|glm|openrouter
+One role only:                           --planner X  --builder X  --critic X  --fixer X
+Reasoning effort for every role:         --effort low|medium|high`;
 
 // Flags beat .env: --provider sets every role, then a role flag sets just that role.
 function applyProviderFlags() {
   if (values.provider) useProvider(values.provider);
+  if (values.effort) useEffort(values.effort);
   for (const role of ['planner', 'builder', 'critic', 'fixer']) if (values[role]) useProvider(values[role], [role]);
 }
 

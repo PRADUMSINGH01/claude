@@ -138,9 +138,15 @@ const ROLE_EFFORT = {
   fixer: str('FIXER_EFFORT', 'medium'),
 };
 
+// An effort chosen for one run (--effort, or a film's setting in the app) wins over the role defaults above:
+// without it a film set to "low" still wrote its scenes at the builder's "medium".
+export function useEffort(effort) {
+  config.runEffort = effort || '';
+}
+
 export function providerForRole(role) {
   const name = config.roles[role];
-  const p = config.providers[name] && { ...config.providers[name], effort: ROLE_EFFORT[role] || config.providers[name].effort };
+  const p = config.providers[name] && { ...config.providers[name], effort: config.runEffort || ROLE_EFFORT[role] || config.providers[name].effort };
   if (!p) throw new Error(`Unknown provider "${name}" for ${role}; use one of ${Object.keys(providers).join(', ')}`);
   if (!p.apiKey) throw new Error(`Provider "${name}" (${role}) has no API key; set ${KEY_VAR[name] ?? 'its key'} in .env`);
   if (!p.baseURL) throw new Error(`Provider "${name}" (${role}) has no base URL`);

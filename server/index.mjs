@@ -16,6 +16,7 @@ import {
   config,
   providerStatus,
   providerForRole,
+  useEffort,
   useProvider,
 } from '../harness/src/config.js';
 import { listThemes } from '../harness/src/tools/registry-tools.js';
@@ -293,6 +294,9 @@ const activeAbortControllers = new Map();
 const jobQueue = [];
 let activeJobCount = 0;
 const MAX_CONCURRENT_JOBS = Number(process.env.MAX_CONCURRENT_JOBS || 1);
+// Each film sets the shared harness config (provider, model, effort) when it starts; these are the models to
+// return to when a film names none.
+const DEFAULT_MODELS = Object.fromEntries(Object.entries(config.providers).map(([name, p]) => [name, p.model]));
 
 function readJsonSafe(filePath) {
   try {
@@ -836,24 +840,17 @@ async function drainQueue() {
     pushLog(job, job.activity);
     persistJobRecord(job);
 
-    // Apply per-job provider, model, and reasoning effort
+    // Per-job provider, model and reasoning effort, all three set every time so nothing carries over from the
+    // film before (the config is shared: this assumes MAX_CONCURRENT_JOBS=1). The effort reaches every role.
     if (job.provider && config.providers[job.provider]) {
       try {
         useProvider(job.provider);
-        if (job.model) {
-          config.providers[job.provider].model = job.model;
-        }
-        if (job.effort) {
-          config.providers[job.provider].effort = job.effort;
-          config.roles.planner = job.provider;
-          config.roles.builder = job.provider;
-          config.roles.critic = job.provider;
-          config.roles.fixer = job.provider;
-        }
+        config.providers[job.provider].model = job.model || DEFAULT_MODELS[job.provider];
       } catch (err) {
         console.warn(`[server] Warning: Could not configure provider ${job.provider}: ${err.message}`);
       }
     }
+    useEffort(job.effort);
 
     const onEvent = createHarnessEventHandler(job);
     // A resumed job keeps the pipeline it started with.
@@ -1235,7 +1232,7 @@ const server = http.createServer(async (req, res) => {
           name: 'Anthropic Claude',
           ready: statusList.find((p) => p.name === 'claude')?.ready ?? false,
           models: [
-            { id: 'claude-sonnet-5-5', name: 'Claude 3.5 Sonnet', tag: 'Top Tier Visuals', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'State of the art layout, typography & canvas aesthetics' }
+            { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', tag: 'Top Tier Visuals', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'State of the art layout, typography & canvas aesthetics' }
           ]
         },
         {
@@ -1245,6 +1242,15 @@ const server = http.createServer(async (req, res) => {
           models: [
             { id: 'gpt-5-mini', name: 'GPT-5 Mini', tag: 'Reasoning', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'Fast concise reasoning' },
             { id: 'gpt-4o', name: 'GPT-4o', tag: 'Omni', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'Multimodal flagship' }
+          ]
+        },
+        {
+          provider: 'openrouter',
+          name: 'OpenRouter',
+          ready: statusList.find((p) => p.name === 'openrouter')?.ready ?? false,
+          models: [
+            { id: 'deepseek/deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', tag: 'Fast · low cost', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: 'Strong motion code for cents a film; low is quickest, high thinks longest' },
+            { id: 'inclusionai/ling-3.0-flash-vl', name: 'Ling 3.0 Flash VL', tag: 'Vision · experimental', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: 'Cheaper and sees images; one upstream provider, so it can be rate-limited' }
           ]
         },
         {
@@ -1776,7 +1782,7 @@ const server = http.createServer(async (req, res) => {
       // Model & Provider selection from frontend
       const validProviders = ['azure', 'glm', 'claude', 'openai', 'gemini', 'openrouter'];
       let provider = validProviders.includes(body.provider) ? body.provider : (config.roles.builder || 'azure');
-      let model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : (config.providers[provider]?.model || 'qwen--qwen38-27b');
+      let model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : (DEFAULT_MODELS[provider] || 'qwen--qwen38-27b');
       const validEfforts = ['low', 'medium', 'high', 'xhigh', 'max'];
       let effort = validEfforts.includes(body.effort) ? body.effort : (config.providers[provider]?.effort || 'high');
       if (effort === 'max') effort = 'xhigh';

@@ -289,10 +289,15 @@ export async function installRegistryItems(ws, plan, emit) {
   return lines.join('\n\n');
 }
 
-// A composition that declares data-requires-webgpu (a WebGPU shader block, or a scene adapted from one).
+// A composition the film plays that declares data-requires-webgpu (a WebGPU shader block, or a scene adapted
+// from one). Only the files index.html hosts count: an installed block a scene was rebuilt from stays in the
+// project unused, and once raised a false alarm.
 export function requiresWebgpu(projectDir) {
-  const files = fs.readdirSync(projectDir, { recursive: true }).filter((f) => /\.html$/.test(f) && !/node_modules|renders/.test(f));
-  return files.some((f) => fs.readFileSync(path.join(projectDir, f), 'utf8').includes('data-requires-webgpu'));
+  const index = path.join(projectDir, 'index.html');
+  if (!fs.existsSync(index)) return false;
+  const html = fs.readFileSync(index, 'utf8');
+  const played = [...html.matchAll(/data-composition-src="([^"]+)"/g)].map((m) => path.join(projectDir, m[1]));
+  return [index, ...played].some((f) => fs.existsSync(f) && fs.readFileSync(f, 'utf8').includes('data-requires-webgpu'));
 }
 
 export async function renderFinal(ws, emit) {

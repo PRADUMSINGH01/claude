@@ -127,7 +127,7 @@ export function staticProblems(html, id, duration, copy = [], mediaFile = null) 
   if (!html.includes(`__timelines["${id}"]`)) p.push(`register the timeline: window.__timelines["${id}"] = tl`);
   if (/Date\.now|Math\.random|fetch\(|setTimeout|setInterval|repeat:\s*-1/.test(html)) p.push('no Date.now, Math.random, fetch, timers or repeat:-1');
   if (/<link[^>]+href=|<script[^>]+src=/.test(html)) p.push('no external files (link/script src); gsap is already loaded');
-  if (!config.renderGpu && /data-requires-webgpu|navigator\.gpu/.test(html)) p.push('this host has no GPU: build the effect with canvas 2D, CSS or SVG, without WebGPU or data-requires-webgpu');
+  if (!config.renderGpu && needsGpu(html)) p.push('this host has no GPU: build the effect with CSS 3D transforms, canvas 2D or SVG, without WebGPU, three.js or data-requires-webgpu');
   for (const m of html.matchAll(/data-start="([\d.]+)"[^>]*data-duration="([\d.]+)"/g)) {
     if (Number(m[1]) + Number(m[2]) > duration + 0.05) { p.push(`a clip runs to ${Number(m[1]) + Number(m[2])}s, past the scene's ${duration}s`); break; }
   }
@@ -161,6 +161,9 @@ export async function writeScene(scene, ctx, { problems = null, current = null }
   const repair = problems ? `\n\n<problems>\n${problems.map((x) => `- ${x}`).join('\n')}\n</problems>\n\n<current-file>\n${current}\n</current-file>\n\nFix every problem and reply with the whole corrected file in one \`\`\`html block.` : '';
   return ctx.ask(system, user + repair, { label: `${problems ? 'repair' : 'write'} ${scene.id}`, parse: extractHtml });
 }
+
+/** Markup that needs a GPU to render in time: WebGPU, or three.js 3D (lit WebGL scenes). */
+export const needsGpu = (html) => /data-requires-webgpu|navigator\.gpu|three\.module(\.min)?\.js|from\s+["']three["']|"three"\s*:/.test(String(html));
 
 // One line per distinct finding with its count: the check reports each element, and a real run's repair prompt
 // carried the same text_occluded line thirty-one times.

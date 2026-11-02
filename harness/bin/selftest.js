@@ -669,8 +669,13 @@ await step('without a GPU, a written scene that uses WebGPU is sent back to be r
   const saved = config.renderGpu;
   try {
     config.renderGpu = false;
-    assert.match(staticProblems(scene('data-requires-webgpu'), 's', 3).join(), /no GPU: build the effect with canvas 2D/);
+    assert.match(staticProblems(scene('data-requires-webgpu'), 's', 3).join(), /no GPU: build the effect with CSS 3D transforms, canvas 2D or SVG/);
     assert.deepEqual(staticProblems(scene(''), 's', 3), []);
+    // three.js 3D stalls software rendering too (a carousel with shadows stopped a real render at frame 180).
+    const { needsGpu } = await import('../src/build/scenes.js');
+    assert.equal(needsGpu('<script type="importmap">{"imports": {"three": "./assets/three.module.min.js"}}</script>'), true);
+    assert.equal(needsGpu('<script type="module">import * as THREE from "three";</script>'), true);
+    assert.equal(needsGpu('<div style="transform: perspective(800px) rotateY(20deg)"></div>'), false, 'CSS 3D is fine');
     config.renderGpu = true;
     assert.deepEqual(staticProblems(scene('data-requires-webgpu'), 's', 3), [], 'a host with a GPU keeps it');
   } finally {
@@ -687,7 +692,9 @@ await step('a composition that needs WebGPU is found, so a GPU-less host renders
     fs.writeFileSync(path.join(dir, 'compositions', 'title.html'), '<template><div></div></template>');
     assert.equal(requiresWebgpu(dir), false);
     fs.writeFileSync(path.join(dir, 'compositions', 'blob.html'), '<template><div data-requires-webgpu></div></template>');
-    assert.equal(requiresWebgpu(dir), true, 'a WebGPU block in compositions/');
+    assert.equal(requiresWebgpu(dir), false, 'an installed block nothing plays (its scene was rebuilt) does not count');
+    fs.writeFileSync(path.join(dir, 'index.html'), '<div id="root"><div data-composition-src="compositions/blob.html"></div></div>');
+    assert.equal(requiresWebgpu(dir), true, 'a WebGPU block the film plays');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

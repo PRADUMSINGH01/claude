@@ -284,7 +284,7 @@ async function shortlistFor(ws, query, { needsText, type, prompt, background = f
   const out = [];
   for (const item of found.items) {
     if (blockedForPrompt(item.name, prompt)) continue; // someone else's product UI, not asked for
-    if (!config.renderGpu && item.tags.some((t) => /^webgpu/.test(t))) continue; // needs a GPU the render host lacks
+    if (!config.renderGpu && item.tags.some((t) => /^(webgpu|pbr$|shadows$)/.test(t))) continue; // WebGPU or lit 3D: needs a GPU the render host lacks
     if (background && !BACKGROUND_KIND.test(`${item.name} ${item.tags.join(' ')} ${item.description}`)) continue;
     const info = await inspectItem(ws, item.name);
     if (!info.ok) continue;

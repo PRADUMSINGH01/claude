@@ -15,7 +15,7 @@ import { runCheck } from '../tools/project-tools.js';
 import { layerEvidence, renderFinal, verifyOutput } from '../orchestrator.js';
 import { assemble, indexHtml } from './assemble.js';
 import { creditsMarkdown, getStock } from '../media/stock.js';
-import { findingsFor, sceneFile, staticProblems, writeFallback, writeScene } from './scenes.js';
+import { findingsFor, needsGpu, sceneFile, staticProblems, writeFallback, writeScene } from './scenes.js';
 
 const MAX_REPAIRS = 2;
 // Scene writes are network-bound: run several at once (BUILD_PARALLEL), as a pool so one slow scene never
@@ -197,13 +197,14 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
     emit('media', { items: credits.map((m) => ({ id: m.scene, kind: m.kind, source: m.source, by: m.credit.name, file: m.file })), missing: wantMedia.filter((s) => !s.stock).map((s) => s.id) });
   }
 
-  // No GPU on this host: a WebGPU block can't render here (in software the capture stalls; a real film stopped
-  // at frame 60 of 450), so the writer rebuilds it with canvas 2D, CSS or SVG in the first pass.
+  // No GPU on this host: WebGPU blocks and lit three.js 3D render in software, too slowly for the capture (a real
+  // film stalled at frame 60 on a WebGPU blob, then at frame 180 on a three.js carousel with shadows), so the
+  // writer rebuilds those scenes with CSS 3D transforms, canvas 2D or SVG in the first pass.
   if (!config.renderGpu) {
-    const gpuOnly = scenes.filter((s) => s.mode !== 'write' && fs.readFileSync(path.join(ws.projectDir, s.file), 'utf8').includes('data-requires-webgpu'));
+    const gpuOnly = scenes.filter((s) => s.mode !== 'write' && needsGpu(fs.readFileSync(path.join(ws.projectDir, s.file), 'utf8')));
     for (const s of gpuOnly) {
       s.escalatedFrom = s.item;
-      s.escalationReason = 'needs WebGPU, which this host lacks: rebuild the effect with canvas 2D, CSS or SVG';
+      s.escalationReason = 'needs a GPU (WebGPU or three.js 3D), which this host lacks: rebuild the effect with CSS 3D transforms, canvas 2D or SVG';
       delete s.scale;
       s.mode = 'write';
       s.file = `compositions/${s.id}.html`;

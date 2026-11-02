@@ -1209,7 +1209,6 @@ const server = http.createServer(async (req, res) => {
           ready: statusList.find((p) => p.name === 'azure')?.ready ?? false,
           models: [
             { id: 'gpt-5-mini', name: 'GPT-5 Mini', tag: 'Serverless MaaS', defaultEffort: 'high', efforts: ['low', 'medium', 'high', 'max'], description: 'Fast concise reasoning & swift logic' },
-            { id: 'qwen--qwen38-27b', name: 'Qwen 3.8 27B', tag: 'A100 GPU · vLLM', defaultEffort: 'xhigh', efforts: ['low', 'medium', 'high', 'xhigh'], description: 'Max reasoning with deep visual & motion planning on 2x A100' },
             { id: 'DeepSeek-V4-Pro', name: 'DeepSeek V4 Pro', tag: 'Serverless MaaS', defaultEffort: 'high', efforts: ['low', 'medium', 'high', 'max'], description: 'Fast code generation and animation scripting' }
           ]
         },
@@ -1262,7 +1261,7 @@ const server = http.createServer(async (req, res) => {
         success: true,
         current: {
           provider: config.roles.builder || 'azure',
-          model: config.providers[config.roles.builder || 'azure']?.model || 'qwen--qwen38-27b',
+          model: config.providers[config.roles.builder || 'azure']?.model || 'gpt-5-mini',
           effort: config.providers[config.roles.builder || 'azure']?.effort || 'xhigh',
         },
         providers: statusList,
@@ -1777,7 +1776,7 @@ const server = http.createServer(async (req, res) => {
       // Model & Provider selection from frontend
       const validProviders = ['azure', 'glm', 'claude', 'openai', 'gemini', 'openrouter'];
       let provider = validProviders.includes(body.provider) ? body.provider : (config.roles.builder || 'azure');
-      let model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : (config.providers[provider]?.model || 'qwen--qwen38-27b');
+      let model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : (config.providers[provider]?.model || 'gpt-5-mini');
       const validEfforts = ['low', 'medium', 'high', 'xhigh', 'max'];
       let effort = validEfforts.includes(body.effort) ? body.effort : (config.providers[provider]?.effort || 'high');
       if (effort === 'max') effort = 'xhigh';

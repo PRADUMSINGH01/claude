@@ -23,6 +23,20 @@ export function skeleton(id) {
 `;
 }
 
+// Stock media as a scene's backdrop, per the contract: the <video>/<img> itself is the timed clip (never its
+// wrapper too), a video is muted and never played or seeked by script, and legibility comes from a scrim
+// layer in the ground colour, not a CSS filter on the footage.
+export function mediaMarkup(scene, { scrim = 0.5 } = {}) {
+  const m = scene.stock;
+  if (!m) return '';
+  const id = scene.id;
+  const fill = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;';
+  const media = m.kind === 'video'
+    ? `<video id="${id}-media" class="clip" data-start="0" data-duration="${scene.duration}" src="${m.file}" muted playsinline style="${fill}"></video>`
+    : `<img id="${id}-media" class="clip" data-start="0" data-duration="${scene.duration}" src="${m.file}" alt="" style="${fill}" />`;
+  return `${media}\n    <div id="${id}-scrim" style="position:absolute;inset:0;background:var(--bg);opacity:${scrim};"></div>`;
+}
+
 // A plain, correct reveal of the scene's copy: each word blurs in where it sits (motion.md#motion-craft:
 // blur 6px → 0 and opacity 0 → 1 in 0.13 s, 0.067 s apart, no translate), then holds still. Used before the writer
 // runs and whenever its output can't be made to pass the checks. A companion (extra copy over a block)
@@ -42,12 +56,12 @@ export function fallbackScene(scene, format, roles) {
   return `<template>
   <style>
     #root { position: absolute; inset: 0; container-type: size; display: flex; flex-direction: column; align-items: center; justify-content: ${scene.companionOf ? 'flex-end' : 'center'}; gap: 2cqh; font-family: var(--font-display); color: var(--fg); text-align: center; padding: 0 6cqw${scene.companionOf ? ' 16cqh' : ''}; }
-    #root .${id}-line { font-size: ${size.toFixed(2)}cqmin; line-height: 1.1; font-weight: 700; max-width: 100%; }
+    #root .${id}-line { position: relative; z-index: 1; font-size: ${size.toFixed(2)}cqmin; line-height: 1.1; font-weight: 700; max-width: 100%; }
     #root .${id}-line:nth-child(n + 2) { font-size: ${Math.max(2.8, size * 0.55).toFixed(2)}cqmin; font-weight: 400; opacity: 0.85; }
     #root .${id}-w { display: inline-block; }
   </style>
   <div id="root" data-composition-id="${id}">
-${items.map((x) => `    <div id="${x.id}" class="clip ${id}-line" data-start="0" data-duration="${d}">${x.words.map((w, j) => `<span id="${x.id}-w${j + 1}" class="${id}-w">${esc(w.w)}</span>`).join(' ')}</div>`).join('\n')}
+${scene.stock ? `    ${mediaMarkup(scene)}\n` : ''}${items.map((x) => `    <div id="${x.id}" class="clip ${id}-line" data-start="0" data-duration="${d}">${x.words.map((w, j) => `<span id="${x.id}-w${j + 1}" class="${id}-w">${esc(w.w)}</span>`).join(' ')}</div>`).join('\n')}
   </div>
   <script>
     const tl = gsap.timeline({ paused: true });

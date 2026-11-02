@@ -8,6 +8,7 @@ import { requireSection } from './tools/skill-tools.js';
 import { catalogSearch, inspectItem, listThemes } from './tools/registry-tools.js';
 import { opaqueOverBackground, plannerHandoff } from './roles/planner.js';
 import { Workspace } from './workspace.js';
+import { stockEnabled } from './media/stock.js';
 
 // ---- 1. Understand -----------------------------------------------------------
 
@@ -329,7 +330,8 @@ const PLAN_SHAPE = `{
     "purpose": "what the viewer takes from it", "text": ["exact copy"],
     "block": "<registry name from the shortlist, or null to hand-build>", "components": [],
     "vars": { "<variable id of the block or its components>": "<value>" },
-    "build": "layout and objects in numbers (px, %, hex)", "motion": "the one hero move, eases, hand-off", "sound": ""
+    "build": "layout and objects in numbers (px, %, hex)", "motion": "the one hero move, eases, hand-off", "sound": "",
+    "media": null OR { "kind": "video | photo", "query": "what is in frame, 3-8 concrete words" }
   } ],
   "audio": { "music": null, "sfx": null, "voiceover": null },
   "spec": "SPEC.md text following the template",
@@ -356,6 +358,9 @@ Rules:
 - Set the chosen block's text variables to the beat's copy exactly, and its colour variables to theme colours. Only use variable ids the shortlist lists for that block.
 - With a background layer, every main block must let it show through: set its background/ground variable to "transparent" (never a solid colour), and say in build to clear any opaque ground in its CSS.
 - Theme: if the brief names a preset, theme is exactly {"preset": "<that name>"} (its own colours and fonts apply). Otherwise a custom theme with the brief's colours and fonts. SPEC.md may use only theme colours (#FFFFFF/#000000 allowed). Colour variables take colours, never "transparent" (only background/ground variables may be transparent).
+${stockEnabled()
+    ? `- media: real footage or a photo from a free stock library (Pexels), as the scene's full-frame backdrop under its copy. Use it where the film is about real things (a place, people, an activity, nature, a physical product category) and the storyline shows them; leave it null for type-led scenes, charts, wordmarks and end cards, and for anything that must be one specific real product, person or logo (stock can't show those). query: what is in frame in 3-8 concrete English words (subject, setting, light), no text, no brand names. "video" for anything that moves, "photo" for a still. A scene with media is hand-built (block null); its build says where the copy sits and how dark the scrim over the media is.`
+    : '- media is always null (no stock library is configured): every scene is type, shapes and lines; never plan photographs, people or hands.'}
 - spec follows the template below, with numbers instead of adjectives.
 
 <spec-template>
@@ -397,6 +402,12 @@ export function planChecks(plan, brief, sl) {
   const info = Object.fromEntries(allItems(sl).map((i) => [i.name, i]));
   const varsOf = (i) => [...i.textVars, ...i.imageVars, ...i.colorVars, ...i.otherVars];
   for (const s of plan.scenes ?? []) {
+    if (s.media) {
+      if (!stockEnabled()) errs.push(`${s.id}: no stock library is configured, so media must be null`);
+      else if (!['video', 'photo'].includes(s.media.kind) || !String(s.media.query ?? '').trim()) errs.push(`${s.id}: media needs kind "video" or "photo" and a query`);
+      else if (s.block) errs.push(`${s.id}: a scene with media is hand-built: set block to null`);
+      else if ((s.layer ?? 'main') !== 'main') errs.push(`${s.id}: only a main scene takes media`);
+    }
     // Variables must belong to what the scene uses: its block, or its components.
     const used = [s.block, ...(s.components ?? [])].filter(Boolean).map((n) => info[n]).filter(Boolean);
     const known = new Set(used.flatMap(varsOf));

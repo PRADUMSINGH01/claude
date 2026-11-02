@@ -14,6 +14,7 @@ import { hfJson, quote } from '../hf.js';
 import { runCheck } from '../tools/project-tools.js';
 import { layerEvidence, renderFinal, verifyOutput } from '../orchestrator.js';
 import { assemble, indexHtml } from './assemble.js';
+import { creditsMarkdown, getStock } from '../media/stock.js';
 import { findingsFor, sceneFile, staticProblems, writeFallback, writeScene } from './scenes.js';
 
 const MAX_REPAIRS = 2;
@@ -134,12 +135,12 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
         html = await writeScene(s, ctx);
         report.scenes[s.id].attempts++;
       }
-      let problems = html ? staticProblems(html, s.id, s.duration, s.text) : ['no html in the reply'];
+      let problems = html ? staticProblems(html, s.id, s.duration, s.text, s.stock?.file) : ['no html in the reply'];
       if (problems.length && html) {
         emit('scene', { id: s.id, step: 'repair', problems });
         html = (await writeScene(s, ctx, { problems, current: html })) ?? html;
         report.scenes[s.id].attempts++;
-        problems = staticProblems(html, s.id, s.duration, s.text);
+        problems = staticProblems(html, s.id, s.duration, s.text, s.stock?.file);
       }
       if (html && !problems.length) fs.writeFileSync(sceneFile(ws, s), html);
       else { writeFallback(ws, s, ctx); report.scenes[s.id].result = 'fallback (contract)'; report.scenes[s.id].why = problems; }
@@ -156,7 +157,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
         emit('scene', { id: s.id, step: `repair ${round}`, problems });
         const html = await writeScene(s, ctx, { problems, current: fs.readFileSync(sceneFile(ws, s), 'utf8') });
         report.scenes[s.id].attempts++;
-        if (html && !staticProblems(html, s.id, s.duration, s.text).length) fs.writeFileSync(sceneFile(ws, s), html);
+        if (html && !staticProblems(html, s.id, s.duration, s.text, s.stock?.file).length) fs.writeFileSync(sceneFile(ws, s), html);
       });
       check = null; // the files changed since: check again
     }
@@ -166,6 +167,31 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
       if (errs.length) { writeFallback(ws, s, ctx); report.scenes[s.id].result = 'fallback (check errors)'; report.scenes[s.id].why = errs; } else report.scenes[s.id].result = 'written';
     }
   };
+
+  // 1b. Media: free stock footage or photos for scenes whose plan asks for real imagery (Pexels, then
+  // Pixabay), all at once. A scene with nothing found stays type only, and says so.
+  const wantMedia = scenes.filter((s) => s.media?.query && s.mode === 'write');
+  if (wantMedia.length) {
+    step('media');
+    const got = await Promise.all(wantMedia.map((s) => time('stock', getStock({
+      kind: s.media.kind === 'photo' ? 'photo' : 'video', query: s.media.query, format: plan.format,
+      minSeconds: s.duration, projectDir: ws.projectDir, name: s.id,
+    }))));
+    const credits = [];
+    for (const [i, s] of wantMedia.entries()) {
+      if (got[i].error) {
+        report.warnings.push(`${s.id}: no stock ${s.media.kind} for "${s.media.query}" (${got[i].error}); the scene is type only`);
+        continue;
+      }
+      s.stock = got[i];
+      credits.push({ scene: s.id, ...got[i] });
+      writeFallback(ws, s, ctx); // the starting file shows the media too
+    }
+    report.media = credits;
+    if (credits.length) fs.writeFileSync(path.join(ws.projectDir, 'CREDITS.md'), creditsMarkdown(credits));
+    ws.chownAgentDirs();
+    emit('media', { items: credits.map((m) => ({ id: m.scene, kind: m.kind, source: m.source, by: m.credit.name, file: m.file })), missing: wantMedia.filter((s) => !s.stock).map((s) => s.id) });
+  }
 
   step('write scenes');
   await writeAndVerify(scenes.filter((s) => s.mode === 'write'));
@@ -212,7 +238,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
       emit('scene', { id: s.id, step: 'film repair', problems });
       const html = await writeScene(s, ctx, { problems, current: fs.readFileSync(sceneFile(ws, s), 'utf8') });
       report.scenes[s.id].attempts++;
-      if (html && !staticProblems(html, s.id, s.duration, s.text).length) fs.writeFileSync(sceneFile(ws, s), html);
+      if (html && !staticProblems(html, s.id, s.duration, s.text, s.stock?.file).length) fs.writeFileSync(sceneFile(ws, s), html);
     });
     const c = await quickCheck(writtenWithIssues);
     for (const s of writtenWithIssues) if (findingsFor(c, s.file).some((f) => f.startsWith('[error]'))) { writeFallback(ws, s, ctx); report.scenes[s.id].result = 'fallback (film repair broke it)'; }
@@ -248,7 +274,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
       before.set(s.id, fs.readFileSync(sceneFile(ws, s), 'utf8'));
       const html = await writeScene(s, ctx, { problems: [`${i.problem} → ${i.fix}`], current: before.get(s.id) });
       report.scenes[s.id].attempts++;
-      if (html && !staticProblems(html, s.id, s.duration, s.text).length) fs.writeFileSync(sceneFile(ws, s), html);
+      if (html && !staticProblems(html, s.id, s.duration, s.text, s.stock?.file).length) fs.writeFileSync(sceneFile(ws, s), html);
     });
     if (toFix.length) {
       const [c, blank] = await Promise.all([quickCheck(toFix.map(({ s }) => s)), measureFilm(toFix.map(({ s }) => s))]);
@@ -325,7 +351,7 @@ async function measure(ws, plan, scenes, time = (_kind, work) => work) {
       }
       // The hero fills at least 40% of the frame's width or height (the scene writer's own rule), measured so
       // ready-made blocks are held to it too. Not over a background layer, whose texture hides the copy's box.
-      if (s.layer !== 'main' || hasBackground) return;
+      if (s.layer !== 'main' || hasBackground || s.stock) return; // footage fills the frame: no copy box to measure
       const ink = await inkBox(ws, file);
       // Copy that touches the frame's edge is cut off ("Saturdays. 6 A" in a real run): text belongs in the
       // central 80%, content in the central 90%.
@@ -481,6 +507,10 @@ function reportMarkdown(r, plan) {
 | Scene | How it was made | Item | Model calls | Result |
 |---|---|---|---|---|
 ${rows.join('\n')}
+
+## Media
+
+${(r.media ?? []).length ? r.media.map((m) => `- ${m.scene}: ${m.kind} "${m.query}" by ${m.credit.name} (${m.source}) → ${m.file}`).join('\n') : '- none'}
 
 ## Measured checks
 

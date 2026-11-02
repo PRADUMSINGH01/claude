@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseModelJson } from '../plan.js';
 import { requireSection } from '../tools/skill-tools.js';
-import { fallbackScene, skeleton } from './scene-files.js';
+import { fallbackScene, mediaMarkup, skeleton } from './scene-files.js';
 
 const BOX_SIZE = { top: [1, 0.3], bottom: [1, 0.22], corner: [0.32, 0.16], full: [1, 1] };
 
@@ -80,6 +80,7 @@ export function scenePacket(scene, ctx) {
     `- Root: <div id="root" data-composition-id="${scene.id}">; register window.__timelines["${scene.id}"] = tl; ids prefixed "${scene.id}-"; every clip inside 0-${scene.duration}s.`,
     `- The box is ${box.width}x${box.height}px.`,
     `- The ground is ${roles.dark ? 'DARK' : 'LIGHT'}: type in var(--fg) reads. Do not paint a background on #root${scene.layer === 'main' && ctx.hasBackground ? ' (a background layer runs under this scene)' : ' unless the scene asks for one'}.`,
+    scene.stock ? `- MEDIA: this scene's backdrop is the stock ${scene.stock.kind} ${scene.stock.file} (${scene.stock.width}x${scene.stock.height}${scene.stock.duration ? `, ${scene.stock.duration}s` : ''}, "${scene.stock.query}"). Put it first inside #root exactly like this, then a scrim, then the copy above both (position:relative; z-index:1):\n  ${mediaMarkup(scene).replace(/\n\s*/g, '\n  ')}\n  The ${scene.stock.kind} element is the timed clip: never put it inside another .clip, never play/pause/seek it, no CSS filter on it. A slow push-in (scale 1 → 1.06 over the scene) may go on an untimed wrapper around it. Tune the scrim's opacity (0.35-0.7) so the copy reads; the copy stays the hero.` : null,
     scene.layer === 'transition' ? `- THIS SCENE IS A TRANSITION over the cut at ${(scene.duration / 2).toFixed(2)}s (its midpoint). It has no text. It must COVER THE WHOLE FRAME with opaque theme colours at exactly that midpoint (the outgoing beat must not show), and be fully clear again at its start and end (#root transparent, shapes off-frame). Build it from bold shapes: colour blocks, slices, an iris, a flood. Ease in hard, ease out hard; the cover moment is short. Follow the style in the scene's build.` : null,
   ].filter(Boolean);
 
@@ -111,8 +112,9 @@ export const visibleText = (html) => String(html)
   .replace(/&(#?\w+);/g, (m, e) => ENTITIES[e] ?? m);
 const squash = (s) => String(s).toLowerCase().replace(/[’‘]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, '');
 
-export function staticProblems(html, id, duration, copy = []) {
+export function staticProblems(html, id, duration, copy = [], mediaFile = null) {
   const p = [];
+  if (mediaFile && !html.includes(mediaFile)) p.push(`the scene's backdrop ${mediaFile} is missing: put it first inside #root as the MEDIA rule shows`);
   // Copy is the one thing that must be exact. A real run wrote "Mornin<span>g</span>" and kept the "s" only
   // in an aria-label, so the film said "Slow Morning".
   const shown = squash(visibleText(html));

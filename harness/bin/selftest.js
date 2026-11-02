@@ -543,6 +543,49 @@ await step('a scene must show its copy whole as visible text (not only in an att
   assert.deepEqual(staticProblems(letters, 'a', 2, ['Slow Mornings & co']), []);
 });
 
+await step('stock media: lightest sharp file, downloaded and credited; scenes and fallbacks use it by the contract', async () => {
+  const { getStock, pickFile, creditsMarkdown } = await import('../src/media/stock.js');
+  const { fallbackScene } = await import('../src/build/scene-files.js');
+  const { scenePacket, staticProblems } = await import('../src/build/scenes.js');
+  const files = [{ link: 'a', width: 3840, height: 2160, type: 'video/mp4' }, { link: 'b', width: 1280, height: 720, type: 'video/mp4' }, { link: 'c', width: 640, height: 360, type: 'video/mp4' }];
+  assert.equal(pickFile(files, { width: 1920, height: 1080 }).link, 'b', 'the smallest file that is still sharp');
+  const server = http.createServer((req, res) => {
+    const base = `http://127.0.0.1:${server.address().port}`;
+    if (req.url.startsWith('/v1/videos/search')) {
+      assert.equal(req.headers.authorization, 'test-key');
+      res.setHeader('content-type', 'application/json');
+      return res.end(JSON.stringify({ videos: [
+        { id: 7, duration: 2, url: 'p7', user: { name: 'Short', url: 'u7' }, video_files: [{ link: `${base}/f/7.mp4`, width: 1920, height: 1080, file_type: 'video/mp4' }] },
+        { id: 8, duration: 12, url: 'https://www.pexels.com/video/8', user: { name: 'Ana', url: 'https://www.pexels.com/@ana' }, video_files: [{ link: `${base}/f/8-4k.mp4`, width: 3840, height: 2160, file_type: 'video/mp4' }, { link: `${base}/f/8-hd.mp4`, width: 1280, height: 720, file_type: 'video/mp4' }] },
+      ] }));
+    }
+    if (req.url === '/f/8-hd.mp4') return res.end(Buffer.from('00000020ftypisom-fake-video', 'latin1'));
+    res.statusCode = 404;
+    res.end();
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const saved = { key: process.env.PEXELS_API_KEY, base: process.env.PEXELS_API_BASE, pix: process.env.PIXABAY_API_KEY };
+  Object.assign(process.env, { PEXELS_API_KEY: 'test-key', PEXELS_API_BASE: `http://127.0.0.1:${server.address().port}` });
+  delete process.env.PIXABAY_API_KEY;
+  try {
+    const m = await getStock({ kind: 'video', query: 'surf at dawn', format: { width: 1920, height: 1080 }, minSeconds: 4, projectDir: ws.projectDir, name: 'wave' });
+    assert.equal(m.file, 'assets/media/wave.mp4', JSON.stringify(m));
+    assert.deepEqual([m.width, m.credit.name, m.source], [1280, 'Ana', 'pexels'], 'too-short clips are skipped; the HD file is chosen');
+    assert.ok(fs.existsSync(path.join(ws.projectDir, 'assets/media/wave.mp4')));
+    assert.match(creditsMarkdown([{ scene: 'wave', ...m }]), /wave: video "surf at dawn" by \[Ana\]\(https:\/\/www\.pexels\.com\/@ana\) on \[Pexels\]/);
+    const scene = { id: 'wave', layer: 'main', duration: 4, text: ['Is it worth paddling out?'], stock: m };
+    const fb = fallbackScene(scene, { width: 1920, height: 1080 }, { dark: true });
+    assert.deepEqual(staticProblems(fb, 'wave', 4, scene.text, m.file), [], 'the code fallback keeps the footage and passes the contract');
+    assert.match(fb, /<video id="wave-media" class="clip" data-start="0" data-duration="4" src="assets\/media\/wave\.mp4" muted playsinline/);
+    assert.match(staticProblems(fb.replace(m.file, 'x.mp4'), 'wave', 4, scene.text, m.file).join(), /backdrop assets\/media\/wave\.mp4 is missing/);
+    const ctx = { format: { width: 1920, height: 1080, fps: 30 }, roles: { dark: true, ground: '#0E2A33', ink: '#F3EFE6', accent: '#FF7A45', display: 'Inter', body: 'Inter' }, lib, items: {}, hasBackground: false };
+    assert.match(scenePacket(scene, ctx).user, /MEDIA: this scene's backdrop is the stock video assets\/media\/wave\.mp4/);
+  } finally {
+    server.close();
+    for (const [k, v] of [['PEXELS_API_KEY', saved.key], ['PEXELS_API_BASE', saved.base], ['PIXABAY_API_KEY', saved.pix]]) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
+});
+
 await step('ids a model leaves out are filled in code, never "undefined"', async () => {
   const { fillIds } = await import('../src/plan.js');
   // What GLM's story step returned: transitions with no id.

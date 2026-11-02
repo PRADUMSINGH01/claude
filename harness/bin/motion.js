@@ -79,6 +79,7 @@ function printBuildEvent(ev) {
     case 'cap': return console.log(`  ⛔ token cap reached (${k(ev.used)} of ${k(ev.maxTokens)}): ${ev.label} skipped, fallback used`);
     case 'error': return console.log(`  ✖ ${ev.label}: ${ev.error}`);
     case 'warning': return console.log(`  ⚠ ${ev.message}`);
+    case 'media': return console.log([...ev.items.map((i) => `  🎞 ${i.id}: ${i.kind} from ${i.source} by ${i.by} → ${i.file}`), ...ev.missing.map((id) => `  ⚠ ${id}: no stock media found; type only`)].join('\n'));
     case 'scaled': return console.log(ev.scenes.map((s) => `  ⤢ ${s.id}: copy too small, host scaled ${s.k}x`).join('\n'));
     case 'render_done': return console.log(`  render ${ev.ok ? 'ok' : 'FAILED'}`);
     case 'done': return console.log(`

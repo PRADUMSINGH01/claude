@@ -58,6 +58,35 @@ test('webhook signatures: valid, tampered, stale, wrong secret', () => {
   assert.equal(verifyWebhook(body, headers, `whsec_${crypto.randomBytes(24).toString('base64')}`), false);
 });
 
+test('sync from Dodo applies a payment whose webhook never came, and never refills credits', async (t) => {
+  const { syncFromDodo } = await import('../billing.mjs');
+  const sub = { subscription_id: 'sub_9', product_id: 'pdt_pro_m', status: 'active', customer: { customer_id: 'cus_9', email: 'late@example.com' }, metadata: { user_id: 'usr_late', tier: 'pro', interval: 'monthly' }, created_at: new Date().toISOString(), next_billing_date: new Date(Date.now() + 30 * 86400000).toISOString(), previous_billing_date: new Date().toISOString() };
+  const other = { ...sub, subscription_id: 'sub_x', metadata: { user_id: 'someone-else' }, customer: { customer_id: 'cus_x', email: 'x@example.com' } };
+  const dodo = http.createServer((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (req.url.startsWith('/subscriptions')) return res.end(JSON.stringify({ items: [other, sub] }));
+    if (req.url.startsWith('/payments')) return res.end(JSON.stringify({ items: [{ payment_id: 'pay_9', status: 'succeeded', total_amount: 93219, currency: 'INR', subscription_id: 'sub_9', customer: sub.customer, created_at: sub.created_at }] }));
+    res.statusCode = 404;
+    res.end('{}');
+  });
+  await new Promise((r) => dodo.listen(0, '127.0.0.1', r));
+  const saved = { ...process.env };
+  Object.assign(process.env, { DODO_PAYMENTS_API_KEY: 'k', DODO_PAYMENTS_BASE_URL: `http://127.0.0.1:${dodo.address().port}`, DODO_PRODUCT_PRO_MONTHLY: 'pdt_pro_m' });
+  t.after(() => {
+    dodo.close();
+    for (const k of ['DODO_PAYMENTS_API_KEY', 'DODO_PAYMENTS_BASE_URL', 'DODO_PRODUCT_PRO_MONTHLY']) if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
+  });
+  const user = { id: 'usr_late', email: 'late@example.com', plan: { tier: 'free' } };
+  const db = { users: [user] };
+  await syncFromDodo(db, user);
+  assert.deepEqual([effectiveTier(user), user.plan.customerId, credits(user).limit], ['pro', 'cus_9', 600]);
+  assert.deepEqual(user.billing.invoices.map((i) => [i.id, i.amount, i.currency]), [['pay_9', 932.19, 'INR']]);
+  user.usage.credits.used = 100;
+  await syncFromDodo(db, user);
+  assert.equal(credits(user).used, 100, 'a second sync must not refill credits');
+  assert.equal(user.billing.invoices.length, 1, 'the payment is recorded once');
+});
+
 test('register → paywall → checkout → webhooks → invoices → plan change → portal', async (t) => {
   // A fake Dodo API that records what the server asks for.
   const calls = [];

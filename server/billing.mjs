@@ -156,6 +156,28 @@ export async function portalLink({ user, returnUrl }) {
   return r.link;
 }
 
+// The safety net for a missed webhook (a wrong endpoint URL or event filter, the tunnel down): ask Dodo
+// for this user's subscription and payments and apply them like events. Dodo's own API is the authority
+// here. Credits reset only when a subscription becomes active for this user for the first time, so calling
+// this again never refills them.
+export async function syncFromDodo(db, user) {
+  if (!billingConfigured()) throw new BillingError(503, 'Payments are not set up on this server yet.', 'BILLING_NOT_CONFIGURED');
+  const subs = (await dodo('GET', '/subscriptions?page_size=100')).items ?? [];
+  const mine = subs
+    .filter((s) => s.metadata?.user_id === user.id || (user.plan?.customerId && s.customer?.customer_id === user.plan.customerId))
+    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  const sub = mine.find((s) => ['active', 'past_due'].includes(s.status)) ?? mine[0];
+  if (!sub) return { applied: [], message: 'no subscription found at Dodo' };
+  const known = user.plan?.subscriptionId === sub.subscription_id && user.plan?.status === 'active';
+  const type = sub.status === 'active' ? (known ? 'subscription.updated' : 'subscription.active') : `subscription.${sub.status}`;
+  const applied = [applyEvent(db, { type, data: { ...sub, metadata: { ...sub.metadata, user_id: user.id } } })];
+  const pays = (await dodo('GET', '/payments?page_size=100')).items ?? [];
+  for (const p of pays.filter((x) => x.subscription_id === sub.subscription_id)) {
+    applied.push(applyEvent(db, { type: p.status === 'succeeded' ? 'payment.succeeded' : 'payment.failed', data: { ...p, metadata: { ...p.metadata, user_id: user.id } } }));
+  }
+  return { applied };
+}
+
 // Standard Webhooks, as Dodo signs them: HMAC-SHA256 over "id.timestamp.body" with the base64 secret after
 // "whsec_", sent as space-separated "v1,<base64>" entries. Five minutes of clock tolerance.
 export function verifyWebhook(rawBody, headers, secret = env('DODO_PAYMENTS_WEBHOOK_KEY'), now = Date.now()) {

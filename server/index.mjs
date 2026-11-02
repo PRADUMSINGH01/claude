@@ -19,7 +19,7 @@ import {
   useProvider,
 } from '../harness/src/config.js';
 import { listThemes } from '../harness/src/tools/registry-tools.js';
-import { applyEvent, BillingError, billingConfigured, charge, credits, effectiveTier, paywall, portalLink, refund, startCheckout, verifyWebhook } from './billing.mjs';
+import { applyEvent, BillingError, billingConfigured, charge, credits, effectiveTier, paywall, portalLink, refund, startCheckout, syncFromDodo, verifyWebhook } from './billing.mjs';
 
 const JOBS_DIR = config.jobsDir;
 // plan-build (default): plan in a few short calls, then code assembles and the model writes only
@@ -2246,6 +2246,22 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // Pull the user's subscription from Dodo (the app calls this on return from checkout): the plan is right
+    // even when a webhook is late or was never sent.
+    if (pathname === '/api/billing/sync' && method === 'POST') {
+      const user = getAuthenticatedUser(req);
+      if (!user) return sendError(req, res, 401, 'Please sign in.', 'UNAUTHORIZED');
+      try {
+        const r = await syncFromDodo(db, user);
+        saveDb();
+        for (const line of r.applied) console.log(`[billing] sync ${line}`);
+        return sendJson(req, res, 200, { success: true, user: sanitizeUser(user), ...r });
+      } catch (err) {
+        if (err instanceof BillingError) return sendError(req, res, err.status, err.message, err.code);
+        throw err;
+      }
+    }
+
     if (pathname === '/api/billing/status' && method === 'GET') {
       return sendJson(req, res, 200, { success: true, configured: billingConfigured() });
     }
@@ -2253,7 +2269,10 @@ const server = http.createServer(async (req, res) => {
     // Dodo calls this. The signature is checked on the exact bytes received; each event is applied once.
     if (pathname === '/api/billing/webhook' && method === 'POST') {
       const raw = await readRawBody(req);
-      if (!verifyWebhook(raw, req.headers)) return sendError(req, res, 401, 'Invalid webhook signature.', 'INVALID_SIGNATURE');
+      if (!verifyWebhook(raw, req.headers)) {
+        console.warn(`[billing] webhook rejected: ${req.headers['webhook-signature'] ? 'signature does not match DODO_PAYMENTS_WEBHOOK_KEY, or the timestamp is over 5 min old' : 'no webhook signature headers'}`);
+        return sendError(req, res, 401, 'Invalid webhook signature.', 'INVALID_SIGNATURE');
+      }
       const id = String(req.headers['webhook-id']);
       db.webhookIds ??= [];
       if (db.webhookIds.includes(id)) return sendJson(req, res, 200, { success: true, duplicate: true });

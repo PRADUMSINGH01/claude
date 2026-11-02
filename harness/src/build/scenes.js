@@ -44,7 +44,8 @@ The file must follow the contract below exactly:
 - Ids unique and prefixed "<scene id>-".
 - Sizes relative to the box: #root has container-type: size, so use cqw/cqh/cqmin for type and spacing (the box size is in the task).
 - Colours and fonts only through the theme tokens: var(--bg) var(--fg) var(--accent) var(--accent-2) var(--font-display) var(--font-body). Never make text the ground colour.
-- On-screen text: exactly the scene's copy, verbatim. No other words.
+- On-screen text: exactly the scene's copy, verbatim, written as text in the HTML. No other words: remove a component's demo labels, counters and percentages.
+- Words split into separate elements keep their spaces: put them in a block or inline container, never a flex or grid row without a gap (flex drops the spaces, so "Roasted on" reads "Roastedon").
 - Components: when one is listed, adapt its markup, CSS and script into this file as its comment says (set its text and options in code from the scene's values). Don't load external files.
 
 How it looks and moves (the design rules below, in numbers):

@@ -599,6 +599,8 @@ function syncDiskJobs({ startup = false } = {}) {
           userId: savedJob.userId ?? diskJob.userId ?? null,
           credits: savedJob.credits ?? diskJob.credits ?? null,
           creditsRefunded: savedJob.creditsRefunded ?? diskJob.creditsRefunded ?? false,
+          // What it ran on and how often it was retried: a retry after a restart keeps both.
+          ...Object.fromEntries(['provider', 'model', 'effort', 'route', 'vision', 'retries'].filter((k) => savedJob[k] !== undefined).map((k) => [k, savedJob[k]])),
         };
         jobsByPromptId.set(pId, merged);
         jobsByHarnessId.set(savedJob.harnessJobId, merged); // the lists read this map: same record, same owner
@@ -953,7 +955,7 @@ async function drainQueue() {
     // This film's provider, model and reasoning effort, for every role and only for this film: films run side
     // by side (MAX_CONCURRENT_JOBS), and none changes another's settings.
     const settings = config.providers[job.provider]
-      ? { provider: job.provider, model: job.model || undefined, effort: job.effort }
+      ? { provider: job.provider, model: job.model || undefined, effort: job.effort, route: job.route || undefined, vision: job.vision }
       : { effort: job.effort };
 
     const onEvent = createHarnessEventHandler(job);
@@ -1340,12 +1342,41 @@ const MODEL_CATALOG = [
       { id: 'gpt-4o', name: 'GPT-4o', paid: true, tag: 'Omni', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'Multimodal flagship' }
     ]
   },
+  // OpenRouter: one key, many labs. Free models cost nothing but share a daily request limit across the whole
+  // site; Top models cost about $0.3–2 a film, so they need a paid plan. vision: false for a model that can't
+  // take images (the build's look step is skipped for it).
   {
     provider: 'openrouter',
-    name: 'OpenRouter',
+    name: 'OpenRouter · Free',
+    models: [
+      { id: 'nvidia/nemotron-3.5-super-vl:free', name: 'Nemotron 3.5 Super VL', tag: 'Free', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: 'Free and sees images; shared daily limit, so it can be busy' },
+      { id: 'thinkingmachines/inkling:free', name: 'Inkling', tag: 'Free', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: 'Free, long context; shared daily limit, so it can be busy' },
+      { id: 'google/gemma-4-31b-it:free', name: 'Gemma 4 31B', tag: 'Free', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: 'Free and compact; shared daily limit, so it can be busy' },
+      { id: 'nvidia/nemotron-3-ultra-550b-a55b:free', name: 'Nemotron 3 Ultra', tag: 'Free · text only', vision: false, defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: 'Free and large; works without checking its frames' }
+    ]
+  },
+  {
+    provider: 'openrouter',
+    name: 'OpenRouter · Value',
     models: [
       { id: 'deepseek/deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', tag: 'Fast · low cost', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: 'Strong motion code for cents a film; low is quickest, high thinks longest' },
+      { id: 'anthropic/claude-haiku-5.5', name: 'Claude Haiku 5.5', tag: 'Fast · low cost', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: 'Claude quality at a small-model price' },
+      { id: 'z-ai/glm-5.3-flash', name: 'GLM 5.3 Flash', tag: 'Lowest cost', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: 'The cheapest capable model here' },
+      { id: 'minimax/minimax-m3.1-flash', name: 'MiniMax M3.1 Flash', tag: 'Low cost', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: 'Long outputs for big multi-scene films' },
+      { id: 'qwen/qwen3.8-flash', name: 'Qwen 3.8 Flash', tag: 'Low cost', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: 'Quick and steady with layout and type' },
       { id: 'inclusionai/ling-3.0-flash-vl', name: 'Ling 3.0 Flash VL', tag: 'Vision · experimental', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: 'Cheaper and sees images; one upstream provider, so it can be rate-limited' }
+    ]
+  },
+  {
+    provider: 'openrouter',
+    name: 'OpenRouter · Top',
+    models: [
+      { id: 'anthropic/claude-sonnet-5.5', name: 'Claude Sonnet 5.5', paid: true, tag: 'Top', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: 'Best all-round design taste and motion code' },
+      { id: 'anthropic/claude-opus-5.5', name: 'Claude Opus 5.5', paid: true, tag: 'Top · slowest', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: 'The most careful builder, for hero films' },
+      { id: 'openai/gpt-6.1-terra', name: 'GPT-6.1 Terra', paid: true, tag: 'Top', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: "OpenAI's latest, strong at precise layouts" },
+      { id: 'google/gemini-4-argon', name: 'Gemini 4 Argon', paid: true, tag: 'Top', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: "Google's flagship, strong with images and long briefs" },
+      { id: 'x-ai/grok-4.7', name: 'Grok 4.7', paid: true, tag: 'Top', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: "xAI's flagship" },
+      { id: 'moonshotai/kimi-k3.1-pro', name: 'Kimi K3.1 Pro', paid: true, tag: 'Top', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: 'Strong agentic coder' }
     ]
   },
   {
@@ -1357,14 +1388,47 @@ const MODEL_CATALOG = [
   }
 ];
 
-// The provider, model and effort a film request may run on, or why not.
-function chooseModel(user, body) {
+// The providers serving an OpenRouter model, from OpenRouter's public endpoints list, cached an hour: the Studio
+// offers them, and a film's provider choice must be one of them. Only providers that take tool calls (the
+// build needs them), cheapest first.
+const OPENROUTER_ROUTE_SORTS = ['price', 'throughput', 'latency'];
+const openRouterProviderCache = new Map();
+const OPENROUTER_MODELS_URL = (process.env.OPENROUTER_MODELS_URL || 'https://openrouter.ai/api/v1/models').replace(/\/+$/, ''); // tests point it at a stand-in
+async function openRouterProviders(model) {
+  const hit = openRouterProviderCache.get(model);
+  if (hit && Date.now() - hit.at < 60 * 60 * 1000) return hit.providers;
+  const res = await fetch(`${OPENROUTER_MODELS_URL}/${model.split('/').map(encodeURIComponent).join('/')}/endpoints`, { signal: AbortSignal.timeout(8000) });
+  if (!res.ok) throw new Error(`OpenRouter answered ${res.status}`);
+  const per1M = (v) => Math.round(Number(v || 0) * 1e8) / 100;
+  const metric = (v) => (typeof v === 'number' ? v : typeof v?.p50 === 'number' ? v.p50 : null);
+  const providers = ((await res.json())?.data?.endpoints ?? [])
+    .filter((e) => e.tag && (e.supported_parameters ?? []).includes('tools'))
+    .map((e) => ({
+      tag: e.tag,
+      name: e.provider_name || e.tag,
+      quantization: e.quantization && e.quantization !== 'unknown' ? e.quantization : null,
+      inputPerM: per1M(e.pricing?.prompt),
+      outputPerM: per1M(e.pricing?.completion),
+      contextLength: e.context_length ?? null,
+      uptime: typeof e.uptime_last_1d === 'number' ? Math.round(e.uptime_last_1d * 10) / 10 : null,
+      throughput: metric(e.throughput_last_30m),
+      latency: metric(e.latency_last_30m),
+    }))
+    .sort((a, b) => a.inputPerM + a.outputPerM - (b.inputPerM + b.outputPerM));
+  openRouterProviderCache.set(model, { at: Date.now(), providers });
+  return providers;
+}
+
+const catalogEntry = (provider, model) => MODEL_CATALOG.filter((g) => g.provider === provider).flatMap((g) => g.models).find((m) => m.id === model);
+
+// The provider, model, effort and (OpenRouter) provider route a film request may run on, or why not.
+async function chooseModel(user, body) {
   const provider = body.provider || config.roles.builder || 'azure';
-  const group = MODEL_CATALOG.find((g) => g.provider === provider);
-  if (!group) return { status: 400, code: 'UNKNOWN_MODEL', message: `Unknown provider "${String(provider).slice(0, 40)}".` };
+  const groups = MODEL_CATALOG.filter((g) => g.provider === provider);
+  if (!groups.length) return { status: 400, code: 'UNKNOWN_MODEL', message: `Unknown provider "${String(provider).slice(0, 40)}".` };
   const configured = config.providers[provider]?.model;
-  const model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : configured || group.models[0].id;
-  const entry = group.models.find((m) => m.id === model);
+  const model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : configured || groups[0].models[0].id;
+  const entry = catalogEntry(provider, model);
   if (!entry && model !== configured) {
     return { status: 400, code: 'UNKNOWN_MODEL', message: `"${model.slice(0, 60)}" is not one of the Studio's models.` };
   }
@@ -1374,7 +1438,21 @@ function chooseModel(user, body) {
   const efforts = entry?.efforts ?? ['low', 'medium', 'high', 'xhigh', 'max'];
   let effort = efforts.includes(body.effort) ? body.effort : entry?.defaultEffort || config.providers[provider]?.effort || 'high';
   if (effort === 'max') effort = 'xhigh';
-  return { provider, model, effort };
+
+  // OpenRouter only: "auto" (OpenRouter balances), a sort (cheapest, fastest), or one provider by its tag.
+  let route = null;
+  if (provider === 'openrouter' && typeof body.route === 'string' && body.route && body.route !== 'auto') {
+    if (OPENROUTER_ROUTE_SORTS.includes(body.route)) route = body.route;
+    else {
+      const providers = await openRouterProviders(model).catch(() => null);
+      if (!providers) return { status: 503, code: 'ROUTES_UNAVAILABLE', message: "Couldn't check OpenRouter's providers right now. Pick Auto, or try again shortly." };
+      if (!providers.some((p) => p.tag === body.route)) {
+        return { status: 400, code: 'UNKNOWN_ROUTE', message: `"${body.route.slice(0, 40)}" doesn't serve ${entry?.name ?? model} with tool calls. Pick another provider or Auto.` };
+      }
+      route = body.route;
+    }
+  }
+  return { provider, model, effort, route, vision: entry?.vision };
 }
 
 // Limits that keep one account from crowding out everyone else or spending model money on films that are
@@ -1460,6 +1538,18 @@ const server = http.createServer(async (req, res) => {
         providers: providerStatus(),
         models: activeModels,
       });
+    }
+
+    // The providers that can serve one of the Studio's OpenRouter models, for the provider picker.
+    if (pathname === '/api/models/routes' && method === 'GET') {
+      const model = parsedUrl.searchParams.get('model') || '';
+      if (!catalogEntry('openrouter', model)) return sendError(req, res, 404, 'Not one of the Studio\'s OpenRouter models.', 'UNKNOWN_MODEL');
+      try {
+        const providers = await openRouterProviders(model);
+        return sendJson(req, res, 200, { success: true, model, sorts: OPENROUTER_ROUTE_SORTS, providers });
+      } catch {
+        return sendError(req, res, 503, "Couldn't reach OpenRouter right now.", 'ROUTES_UNAVAILABLE');
+      }
     }
 
     if ((pathname === '/api/providers' || pathname === '/api/models') && method === 'GET') {
@@ -2050,12 +2140,12 @@ const server = http.createServer(async (req, res) => {
       const inheritedTheme = resolveThemeFromJob(body.themeFrom, user);
 
       // Only a model from the Studio list, and the pricier ones only on a paid plan.
-      const choice = chooseModel(user, body);
+      const choice = await chooseModel(user, body);
       if (choice.code) {
         const { status, ...rest } = choice;
         return sendJson(req, res, status, { success: false, error: choice.code, ...rest });
       }
-      let { provider, model, effort } = choice;
+      let { provider, model, effort, route, vision } = choice;
 
       const limited = filmLimit(user);
       if (limited) return sendError(req, res, limited.status, limited.message, limited.code);
@@ -2078,6 +2168,7 @@ const server = http.createServer(async (req, res) => {
         provider,
         model,
         effort,
+        ...(route ? { route } : {}),
         // Sound effects are on unless the app turned them off.
         ...(body.sound === false ? { sound: false } : {}),
         // Saved in the job folder's request.json, so the film keeps its owner across restarts.
@@ -2091,6 +2182,8 @@ const server = http.createServer(async (req, res) => {
         provider,
         model,
         effort,
+        ...(route ? { route } : {}),
+        ...(vision !== undefined ? { vision } : {}),
         status: activeJobCount >= MAX_CONCURRENT_JOBS ? 'queued' : 'running',
         harnessJobId: null,
         stage: activeJobCount >= MAX_CONCURRENT_JOBS ? 'queued' : 'preparing',
@@ -2111,7 +2204,7 @@ const server = http.createServer(async (req, res) => {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
-      pushLog(job, `Prompt queued: "${prompt.slice(0, 120)}" [${provider}/${model} · ${effort}]`);
+      pushLog(job, `Prompt queued: "${prompt.slice(0, 120)}" [${provider}/${model} · ${effort}${route ? ` · via ${route}` : ''}]`);
 
       // Charged on submit, refunded if the film fails (see the job's failure path).
       charge(user, job, durationS);
@@ -2187,6 +2280,7 @@ const server = http.createServer(async (req, res) => {
           provider: job.provider,
           model: job.model,
           effort: job.effort,
+          ...(job.route ? { route: job.route } : {}),
           userId: job.userId,
           ...(job.theme && job.theme !== 'custom' ? { theme: job.theme } : {}),
         },

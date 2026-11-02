@@ -55,10 +55,17 @@ export function requestBody(p, messages, tools, toolChoice, maxOut = config.maxO
   if (p.kind === 'openrouter' && p.effort) {
     body.reasoning = p.effort === 'none' ? { enabled: false } : { effort: { minimal: 'low', xhigh: 'high', max: 'high' }[p.effort] ?? p.effort };
   }
+  if (p.kind === 'openrouter' && p.route) body.provider = openRouterRoute(p.route);
   // GLM's thinking is only on or off. Low effort turns it off: thinking can spend a whole 16k–32k output
   // budget before a single line of a scene file is written (seen in real runs).
   if (p.kind === 'glm' && p.effort) body.thinking = { type: ['none', 'minimal', 'low'].includes(p.effort) ? 'disabled' : 'enabled' };
   return body;
+}
+
+// OpenRouter's provider routing: a sort orders every provider serving the model; a provider tag pins that one,
+// with no fallback to another (the choice is the point: its price, region or quantization).
+export function openRouterRoute(route) {
+  return ['price', 'throughput', 'latency'].includes(route) ? { sort: route } : { only: [route], allow_fallbacks: false };
 }
 
 // Gemini's function declarations take an OpenAPI subset: no additionalProperties, no type unions,

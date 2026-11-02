@@ -752,6 +752,26 @@ await step('an effort chosen for the run reaches every role, scene writing inclu
   }
 });
 
+await step("a film's OpenRouter provider choice and image support reach the request", async () => {
+  const { config, providerForRole, withRunSettings } = await import('../src/config.js');
+  const { requestBody } = await import('../src/llm.js');
+  config.providers.fakeor = { kind: 'openrouter', apiKey: 'x', baseURL: 'http://127.0.0.1:9/v1/', model: 'vendor/default', effort: '', vision: true, route: '' };
+  try {
+    const film = (settings) => withRunSettings({ provider: 'fakeor', ...settings }, async () => providerForRole('builder'));
+    const pinned = await film({ model: 'deepseek/deepseek-v4.1-flash', route: 'baidu/fp8', vision: false });
+    assert.deepEqual([pinned.route, pinned.vision], ['baidu/fp8', false]);
+    // The user's own example: only that provider, no fallback.
+    assert.deepEqual(requestBody(pinned, []).provider, { only: ['baidu/fp8'], allow_fallbacks: false });
+    assert.deepEqual(requestBody(await film({ route: 'price' }), []).provider, { sort: 'price' });
+    const auto = await film({});
+    assert.equal(requestBody(auto, []).provider, undefined, 'no choice: OpenRouter balances');
+    assert.equal(auto.vision, true, "a model with no vision flag keeps the provider's");
+    assert.equal(requestBody({ ...config.providers.fakeor, kind: 'azure', route: 'baidu/fp8' }, []).provider, undefined, 'only OpenRouter takes a route');
+  } finally {
+    delete config.providers.fakeor;
+  }
+});
+
 await step('ids a model leaves out are filled in code, never "undefined"', async () => {
   const { fillIds } = await import('../src/plan.js');
   // What GLM's story step returned: transitions with no id.

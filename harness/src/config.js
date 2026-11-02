@@ -43,6 +43,9 @@ const providers = {
     model: ((m) => (m.includes('/') ? m : `${m.split('-')[0]}/${m}`))(str('OPENROUTER_MODEL', str('OPEN_ROUTER_MODEL', 'deepseek/deepseek-v4.1-flash'))),
     effort: str('OPENROUTER_EFFORT', str('OPEN_ROUTER_EFFORT', '')),
     vision: bool('OPENROUTER_VISION', bool('OPEN_ROUTER_VISION', true)),
+    // Which providers serve the model: "price", "throughput" or "latency" sorts them, a provider tag
+    // ("baidu/fp8") uses only that one. Empty: OpenRouter balances.
+    route: str('OPENROUTER_ROUTE', str('OPEN_ROUTER_ROUTE', '')),
   },
   azure: {
     kind: 'azure',
@@ -158,7 +161,15 @@ export function providerForRole(role) {
   const run = runSettings.getStore() ?? {};
   const name = run.provider || config.roles[role];
   const base = config.providers[name];
-  const p = base && { ...base, model: (run.provider && run.model) || base.model, effort: run.effort || config.runEffort || ROLE_EFFORT[role] || base.effort };
+  const own = Boolean(run.provider);
+  const p = base && {
+    ...base,
+    model: (own && run.model) || base.model,
+    effort: run.effort || config.runEffort || ROLE_EFFORT[role] || base.effort,
+    // The film's model decides these: an OpenRouter provider route, and whether it can see images.
+    route: (own && run.route) || base.route,
+    vision: own && typeof run.vision === 'boolean' ? run.vision : base.vision,
+  };
   if (!p) throw new Error(`Unknown provider "${name}" for ${role}; use one of ${Object.keys(providers).join(', ')}`);
   if (!p.apiKey) throw new Error(`Provider "${name}" (${role}) has no API key; set ${KEY_VAR[name] ?? 'its key'} in .env`);
   if (!p.baseURL) throw new Error(`Provider "${name}" (${role}) has no base URL`);

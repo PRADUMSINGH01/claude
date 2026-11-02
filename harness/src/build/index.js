@@ -358,7 +358,9 @@ async function measure(ws, plan, scenes, time = (_kind, work) => work) {
       const ink = await inkBox(ws, file);
       // Copy that touches the frame's edge is cut off ("Saturdays. 6 A" in a real run): text belongs in the
       // central 80%, content in the central 90%.
-      const off = ink && [['left', ink.x], ['right', 1 - ink.x - ink.w], ['top', ink.y], ['bottom', 1 - ink.y - ink.h]].filter(([, gap]) => gap < 0.005).map(([side]) => side);
+      // Cut copy touches the edge along a glyph's height (readable type is at least 2.6% of the frame); a
+      // full-bleed hairline (a sonar line in a real run) touches over a pixel or two and is design, not cut text.
+      const off = ink && Object.entries(ink.edges).filter(([, along]) => along >= 0.015).map(([side]) => side);
       if (off?.length) {
         issues.push({ id: s.id, problem: `at t=${at[i]}s the copy runs off the frame's ${off.join(' and ')} edge, so it is cut off: keep all text inside the central 80% of the frame` });
         return;
@@ -395,6 +397,10 @@ async function inkBox(ws, file) {
   for (const v of px) counts[v]++;
   const ground = counts.indexOf(Math.max(...counts));
   let [x1, x2, y1, y2] = [W, -1, H, -1];
+  // How far along each edge ink touches it (2 px deep): a hairline rule bleeding off the frame touches over 1-2
+  // px, a glyph cut by the edge over its whole height.
+  const touch = { left: [H, -1], right: [H, -1], top: [W, -1], bottom: [W, -1] };
+  const reach = (t, v) => { t[0] = Math.min(t[0], v); t[1] = Math.max(t[1], v); };
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       if (Math.abs(px[y * W + x] - ground) <= 30) continue;
@@ -402,9 +408,15 @@ async function inkBox(ws, file) {
       x2 = Math.max(x2, x);
       y1 = Math.min(y1, y);
       y2 = Math.max(y2, y);
+      if (x < 2) reach(touch.left, y);
+      if (x >= W - 2) reach(touch.right, y);
+      if (y < 2) reach(touch.top, x);
+      if (y >= H - 2) reach(touch.bottom, x);
     }
   }
-  return x2 < 0 ? null : { x: x1 / W, y: y1 / H, w: (x2 - x1 + 1) / W, h: (y2 - y1 + 1) / H };
+  const span = ([a, b], n) => (b < 0 ? 0 : (b - a + 1) / n);
+  const edges = { left: span(touch.left, H), right: span(touch.right, H), top: span(touch.top, W), bottom: span(touch.bottom, W) };
+  return x2 < 0 ? null : { x: x1 / W, y: y1 / H, w: (x2 - x1 + 1) / W, h: (y2 - y1 + 1) / H, edges };
 }
 
 // A ready-made block can't be told a size: scale its host around its copy, to about 45% of the frame on the

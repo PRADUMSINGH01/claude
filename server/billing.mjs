@@ -31,7 +31,7 @@ export function planForProduct(productId) {
 }
 
 // Owners and testers (ADMIN_EMAILS) work without paying.
-const isAdmin = (user) => env('ADMIN_EMAILS').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean).includes(String(user?.email).toLowerCase());
+export const isAdmin = (user) => env('ADMIN_EMAILS').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean).includes(String(user?.email).toLowerCase());
 
 // The tier a user gets right now. A paid tier counts only when it came from Dodo and the subscription is in
 // good standing: active, in its renewal grace period, or cancelled but paid until the period ends.

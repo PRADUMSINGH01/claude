@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node --env-file-if-exists=../.env index.mjs",
     "dev": "node --env-file-if-exists=../.env --watch index.mjs",
-    "test": "node --test test/"
+    "test": "node --test \"test/*.test.mjs\""
   },
   "dependencies": {
     "google-auth-library": "^11.3.2"

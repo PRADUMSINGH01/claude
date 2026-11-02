@@ -19,7 +19,7 @@ import {
   useProvider,
 } from '../harness/src/config.js';
 import { listThemes } from '../harness/src/tools/registry-tools.js';
-import { applyEvent, BillingError, billingConfigured, charge, credits, effectiveTier, paywall, portalLink, refund, startCheckout, syncFromDodo, verifyWebhook } from './billing.mjs';
+import { applyEvent, BillingError, billingConfigured, charge, creditCost, credits, effectiveTier, isAdmin, paywall, PLANS, portalLink, refund, startCheckout, syncFromDodo, verifyWebhook } from './billing.mjs';
 
 const JOBS_DIR = config.jobsDir;
 // plan-build (default): plan in a few short calls, then code assembles and the model writes only
@@ -362,12 +362,37 @@ function findJobSnapshotPath(jobDir) {
   return null;
 }
 
+// Media links carry an unguessable key (an HMAC of the job id), so a <video> tag on another domain plays a
+// film without cookies while nobody can fetch one by guessing its id. Only the owner is ever sent the link.
+function mediaKey(harnessJobId) {
+  return crypto.createHmac('sha256', JWT_SECRET).update(`media:${harnessJobId}`).digest('base64url').slice(0, 24);
+}
+
+function validMediaKey(harnessJobId, key) {
+  const expected = Buffer.from(mediaKey(harnessJobId));
+  const given = Buffer.from(String(key || ''));
+  return given.length === expected.length && crypto.timingSafeEqual(given, expected);
+}
+
 function buildVideoUrl(harnessJobId) {
-  return `${PUBLIC_BASE_URL}/api/videos/${encodeURIComponent(harnessJobId)}/final.mp4`;
+  return `${PUBLIC_BASE_URL}/api/videos/${encodeURIComponent(harnessJobId)}/final.mp4?k=${mediaKey(harnessJobId)}`;
 }
 
 function buildThumbnailUrl(harnessJobId) {
-  return `${PUBLIC_BASE_URL}/api/videos/${encodeURIComponent(harnessJobId)}/thumbnail.jpg`;
+  return `${PUBLIC_BASE_URL}/api/videos/${encodeURIComponent(harnessJobId)}/thumbnail.jpg?k=${mediaKey(harnessJobId)}`;
+}
+
+// A film belongs to the account that ordered it. Films from before accounts were attached have no owner and
+// are shown to admins only.
+function canSeeJob(user, job) {
+  if (!user || !job) return false;
+  return job.userId ? job.userId === user.id : isAdmin(user);
+}
+
+// What a client is sent for a film: its media links rebuilt with their keys (older records hold bare links).
+function presentJob(job) {
+  if (!job) return job;
+  return { ...job, play: job.harnessJobId && job.play?.length ? [buildVideoUrl(job.harnessJobId)] : job.play ?? [] };
 }
 
 function syncDiskJobs() {
@@ -417,6 +442,10 @@ function syncDiskJobs() {
       promptId,
       status,
       harnessJobId,
+      // Owner and charge survive a re-read from disk (they used to be dropped, which broke refunds too).
+      userId: existing?.userId ?? request?.options?.userId ?? null,
+      credits: existing?.credits ?? null,
+      creditsRefunded: existing?.creditsRefunded ?? false,
       stage: status === 'done' ? 'done' : mapHarnessStageToFrontend(state?.stage),
       activity:
         status === 'done'
@@ -455,8 +484,16 @@ function syncDiskJobs() {
       if (!savedJob || typeof savedJob !== 'object') continue;
       if (savedJob.harnessJobId && jobsByHarnessId.has(savedJob.harnessJobId)) {
         const diskJob = jobsByHarnessId.get(savedJob.harnessJobId);
-        const merged = { ...diskJob, id: savedJob.id || diskJob.id, promptId: pId };
+        const merged = {
+          ...diskJob,
+          id: savedJob.id || diskJob.id,
+          promptId: pId,
+          userId: savedJob.userId ?? diskJob.userId ?? null,
+          credits: savedJob.credits ?? diskJob.credits ?? null,
+          creditsRefunded: savedJob.creditsRefunded ?? diskJob.creditsRefunded ?? false,
+        };
         jobsByPromptId.set(pId, merged);
+        jobsByHarnessId.set(savedJob.harnessJobId, merged); // the lists read this map: same record, same owner
       } else {
         // If server restarted while job was running, mark it failed + retryable
         if (savedJob.status === 'running' || savedJob.status === 'queued') {
@@ -1715,9 +1752,10 @@ const server = http.createServer(async (req, res) => {
       // Idempotency check
       if (jobsByPromptId.has(promptId)) {
         const existing = jobsByPromptId.get(promptId);
+        if (!canSeeJob(user, existing)) return sendError(req, res, 409, 'This prompt id is taken; send a new one.', 'PROMPT_ID_TAKEN');
         return sendJson(req, res, 200, {
           success: true,
-          job: existing,
+          job: presentJob(existing),
           message: 'Prompt job already exists',
         });
       }
@@ -1754,6 +1792,8 @@ const server = http.createServer(async (req, res) => {
         provider,
         model,
         effort,
+        // Saved in the job folder's request.json, so the film keeps its owner across restarts.
+        userId: user.id,
         ...(inheritedTheme ? { theme: inheritedTheme } : {}),
       };
 
@@ -1851,13 +1891,14 @@ const server = http.createServer(async (req, res) => {
           provider: job.provider,
           model: job.model,
           effort: job.effort,
+          userId: job.userId,
           ...(job.theme && job.theme !== 'custom' ? { theme: job.theme } : {}),
         },
       });
 
       return sendJson(req, res, 200, {
         success: true,
-        job,
+        job: presentJob(job),
       });
     }
 
@@ -1869,12 +1910,13 @@ const server = http.createServer(async (req, res) => {
         syncDiskJobs();
         job = jobsByPromptId.get(promptId) || jobsByHarnessId.get(promptId);
       }
-      if (!job) {
+      // Someone else's film is "not found", never "forbidden": its id says nothing about whether it exists.
+      if (!job || !canSeeJob(getAuthenticatedUser(req), job)) {
         return sendError(req, res, 404, `No generation job found for promptId "${promptId}".`, 'PROMPT_NOT_FOUND');
       }
       return sendJson(req, res, 200, {
         success: true,
-        job,
+        job: presentJob(job),
       });
     }
 
@@ -1884,6 +1926,7 @@ const server = http.createServer(async (req, res) => {
     const videoStreamMatch = /^\/api\/videos\/([^/]+)\/final\.mp4$/.exec(pathname);
     if (videoStreamMatch && (method === 'GET' || method === 'HEAD')) {
       const jobId = decodeURIComponent(videoStreamMatch[1]);
+      if (!validMediaKey(jobId, parsedUrl.searchParams.get('k'))) return sendError(req, res, 404, 'Video not found', 'VIDEO_NOT_FOUND');
       const videoPath = path.join(JOBS_DIR, jobId, 'project', 'renders', 'final.mp4');
       const download = parsedUrl.searchParams.get('download') === '1';
       return streamVideoFile(req, res, videoPath, download ? `motion-${jobId}.mp4` : null);
@@ -1892,6 +1935,7 @@ const server = http.createServer(async (req, res) => {
     const thumbMatch = /^\/api\/videos\/([^/]+)\/thumbnail\.jpg$/.exec(pathname);
     if (thumbMatch && (method === 'GET' || method === 'HEAD')) {
       const jobId = decodeURIComponent(thumbMatch[1]);
+      if (!validMediaKey(jobId, parsedUrl.searchParams.get('k'))) return sendError(req, res, 404, 'Thumbnail not found', 'THUMBNAIL_NOT_FOUND');
       const snapPath = findJobSnapshotPath(path.join(JOBS_DIR, jobId));
       if (!snapPath || !fs.existsSync(snapPath)) {
         return sendError(req, res, 404, 'Thumbnail not found', 'THUMBNAIL_NOT_FOUND');
@@ -1908,8 +1952,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     if ((pathname === '/api/videos' || pathname === '/api/jobs') && method === 'GET') {
+      const user = getAuthenticatedUser(req);
+      if (!user) return sendError(req, res, 401, 'Please sign in to see your videos.', 'UNAUTHORIZED');
       syncDiskJobs();
-      const list = Array.from(jobsByHarnessId.values()).sort(
+      const list = Array.from(jobsByHarnessId.values()).filter((j) => canSeeJob(user, j)).map(presentJob).sort(
         (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
       );
       return sendJson(req, res, 200, {
@@ -1920,15 +1966,18 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/api/projects' && method === 'GET') {
+      const user = getAuthenticatedUser(req);
+      if (!user) return sendError(req, res, 401, 'Please sign in to see your projects.', 'UNAUTHORIZED');
       syncDiskJobs();
       const projects = Array.from(jobsByHarnessId.values())
+        .filter((j) => canSeeJob(user, j))
         .sort((a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime())
         .map((j) => ({
           id: j.harnessJobId || j.id,
           title: j.title || 'Motion Composition',
           timecode: `00:${String(Math.round(j.durationS || 15)).padStart(2, '0')}`,
           thumbnail: j.harnessJobId ? buildThumbnailUrl(j.harnessJobId) : null,
-          videoUrl: j.play?.[0] || null,
+          videoUrl: presentJob(j).play?.[0] || null,
           status: j.status === 'done' ? 'Completed' : j.status === 'running' ? 'Rendering' : 'Draft',
           ratio: j.ratio || '16:9',
           theme: j.theme || 'custom',
@@ -1941,10 +1990,12 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/api/exports' && method === 'GET') {
+      const user = getAuthenticatedUser(req);
+      if (!user) return sendError(req, res, 401, 'Please sign in to see your exports.', 'UNAUTHORIZED');
       syncDiskJobs();
       const exportsList = [];
       for (const j of jobsByHarnessId.values()) {
-        if (!j.harnessJobId) continue;
+        if (!j.harnessJobId || !canSeeJob(user, j)) continue;
         const mp4 = path.join(JOBS_DIR, j.harnessJobId, 'project', 'renders', 'final.mp4');
         if (fs.existsSync(mp4)) {
           const stat = fs.statSync(mp4);
@@ -1958,7 +2009,7 @@ const server = http.createServer(async (req, res) => {
             sizeBytes: stat.size,
             durationS: j.durationS || 15,
             url: buildVideoUrl(j.harnessJobId),
-            downloadUrl: `${buildVideoUrl(j.harnessJobId)}?download=1`,
+            downloadUrl: `${buildVideoUrl(j.harnessJobId)}&download=1`,
             createdAt: j.updatedAt || j.createdAt,
           });
         }
@@ -1971,9 +2022,12 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/api/exports' && method === 'POST') {
+      const user = getAuthenticatedUser(req);
+      if (!user) return sendError(req, res, 401, 'Please sign in to export.', 'UNAUTHORIZED');
       const body = await readBody(req);
       const projectId = body.projectId || body.jobId;
-      const existing = projectId ? jobsByHarnessId.get(projectId) || jobsByPromptId.get(projectId) : null;
+      const found = projectId ? jobsByHarnessId.get(projectId) || jobsByPromptId.get(projectId) : null;
+      const existing = canSeeJob(user, found) ? presentJob(found) : null;
       return sendJson(req, res, 200, {
         success: true,
         export: {
@@ -2260,6 +2314,55 @@ const server = http.createServer(async (req, res) => {
         if (err instanceof BillingError) return sendError(req, res, err.status, err.message, err.code);
         throw err;
       }
+    }
+
+    // The membership and usage dashboard: the plan, this period's credits, and the films that used them.
+    if (pathname === '/api/usage' && method === 'GET') {
+      const user = getAuthenticatedUser(req);
+      if (!user) return sendError(req, res, 401, 'Please sign in to see your usage.', 'UNAUTHORIZED');
+      syncDiskJobs();
+      const c = credits(user);
+      const since = Date.parse(c.periodStart);
+      const seen = new Set();
+      const films = [...jobsByHarnessId.values(), ...jobsByPromptId.values()]
+        .filter((j) => j.userId === user.id && !seen.has(j.promptId) && seen.add(j.promptId))
+        .filter((j) => Date.parse(j.createdAt) >= since)
+        .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+        .map((j) => ({
+          promptId: j.promptId,
+          title: j.title,
+          status: j.status,
+          createdAt: j.createdAt,
+          durationS: j.durationS ?? null,
+          ratio: j.ratio ?? null,
+          credits: j.credits ?? 0,
+          refunded: Boolean(j.creditsRefunded),
+          thumbnail: j.harnessJobId && j.status === 'done' ? buildThumbnailUrl(j.harnessJobId) : null,
+          videoUrl: presentJob(j).play?.[0] ?? null,
+        }));
+      const p = user.plan ?? {};
+      return sendJson(req, res, 200, {
+        success: true,
+        plan: {
+          tier: c.tier,
+          status: p.source === 'dodo' ? p.status : 'active',
+          interval: p.source === 'dodo' ? p.billingInterval : null,
+          renewsAt: p.source === 'dodo' ? p.currentPeriodEnd : null,
+          cancelAtPeriodEnd: Boolean(p.cancelAtPeriodEnd),
+          manageable: Boolean(p.customerId),
+        },
+        credits: { used: c.used, limit: c.limit, remaining: c.remaining, periodStart: c.periodStart, periodEnd: c.periodEnd },
+        limits: { maxSeconds: PLANS[c.tier].maxSeconds, creditsPerFilm: { 9: creditCost(9), 15: creditCost(15), 30: creditCost(30), 60: creditCost(60) } },
+        totals: {
+          films: films.length,
+          completed: films.filter((f) => f.status === 'done').length,
+          failed: films.filter((f) => f.status === 'failed').length,
+          seconds: films.filter((f) => f.status === 'done').reduce((n, f) => n + (f.durationS ?? 0), 0),
+          creditsCharged: films.reduce((n, f) => n + (f.refunded ? 0 : f.credits), 0),
+          creditsRefunded: films.reduce((n, f) => n + (f.refunded ? f.credits : 0), 0),
+        },
+        films: films.slice(0, 100),
+      });
     }
 
     if (pathname === '/api/billing/status' && method === 'GET') {

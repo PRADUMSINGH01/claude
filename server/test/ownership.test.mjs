@@ -22,10 +22,10 @@ function filmFolder(jobsDir, id, { userId, title }) {
   fs.writeFileSync(path.join(dir, 'project', 'renders', 'final.mp4'), Buffer.alloc(4096, 7));
 }
 
-async function startServer(t, data) {
+async function startServer(t, data, env = {}) {
   const port = 19000 + Math.floor(Math.random() * 900);
   const server = spawn(process.execPath, [path.join(here, '..', 'index.mjs')], {
-    env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', SERVER_DATA_DIR: data, JOBS_DIR: path.join(data, 'jobs'), ADMIN_EMAILS: 'admin@example.com', PUBLIC_API_URL: `http://127.0.0.1:${port}` },
+    env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', SERVER_DATA_DIR: data, JOBS_DIR: path.join(data, 'jobs'), PUBLIC_API_URL: `http://127.0.0.1:${port}`, ...env },
     stdio: ['ignore', 'ignore', 'ignore'],
   });
   const base = `http://127.0.0.1:${port}`;
@@ -52,6 +52,9 @@ test('a film is seen only by its owner, across restarts; media needs its key', a
   const ana = await signUp('ana@example.com');
   const bo = await signUp('bo@example.com');
   const admin = await signUp('admin@example.com');
+  // Admins are named by account id (an email is trusted only once verified).
+  srv.stop();
+  srv = await startServer(t, data, { ADMIN_USER_IDS: admin.id });
 
   filmFolder(path.join(data, 'jobs'), '20261102100000-aaaaaa', { userId: ana.id, title: 'Ana film' });
   filmFolder(path.join(data, 'jobs'), '20261102100001-bbbbbb', { userId: bo.id, title: 'Bo film' });
@@ -82,7 +85,7 @@ test('a film is seen only by its owner, across restarts; media needs its key', a
 
   // A restart reads ownership back from the job folders.
   srv.stop();
-  srv = await startServer(t, data);
+  srv = await startServer(t, data, { ADMIN_USER_IDS: admin.id });
   assert.deepEqual((await list(ana)).jobs.map((j) => j.title), ['Ana film']);
   assert.deepEqual((await list(bo)).jobs.map((j) => j.title), ['Bo film']);
 });

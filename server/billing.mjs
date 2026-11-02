@@ -30,8 +30,11 @@ export function planForProduct(productId) {
   return null;
 }
 
-// Owners and testers (ADMIN_EMAILS) work without paying.
-export const isAdmin = (user) => env('ADMIN_EMAILS').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean).includes(String(user?.email).toLowerCase());
+// Owners and testers work without paying: by account id (ADMIN_USER_IDS), or by email (ADMIN_EMAILS) only once
+// that email is verified, since anyone can sign up with, or change to, an address that isn't theirs.
+const listEnv = (name) => env(name).toLowerCase().split(',').map((s) => s.trim()).filter(Boolean);
+export const isAdmin = (user) =>
+  Boolean(user) && (listEnv('ADMIN_USER_IDS').includes(String(user.id).toLowerCase()) || (user.auth?.emailVerified === true && listEnv('ADMIN_EMAILS').includes(String(user.email).toLowerCase())));
 
 // The tier a user gets right now. A paid tier counts only when it came from Dodo and the subscription is in
 // good standing: active, in its renewal grace period, or cancelled but paid until the period ends.
@@ -229,7 +232,8 @@ export function applyEvent(db, event, now = Date.now()) {
   const email = String(d.customer?.email ?? '').toLowerCase();
   const user = db.users.find((u) => d.metadata?.user_id && u.id === d.metadata.user_id)
     ?? db.users.find((u) => d.customer?.customer_id && u.plan?.customerId === d.customer.customer_id)
-    ?? db.users.find((u) => email && u.email === email);
+    // By email only for a verified address: an unverified sign-up can't collect someone else's payment.
+    ?? db.users.find((u) => email && u.email === email && u.auth?.emailVerified === true);
   if (!user) return `${type}: no user for ${d.metadata?.user_id ?? d.customer?.customer_id ?? email ?? 'unknown'}`;
   const p = (user.plan ??= {});
   if (d.customer?.customer_id) p.customerId = d.customer.customer_id;

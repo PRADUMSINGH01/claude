@@ -431,6 +431,7 @@ const allItems = (sl) => [...Object.values(sl.blocks ?? {}), ...Object.values(sl
 // layer, the brief's preset, readable timing.
 export function planChecks(plan, brief, sl) {
   const errs = [];
+  if (plan.format && brief.format?.duration && Math.abs((plan.format.duration ?? 0) - brief.format.duration) > 0.051) errs.push(`format.duration must be ${brief.format.duration}, as in the brief`);
   const info = Object.fromEntries(allItems(sl).map((i) => [i.name, i]));
   const varsOf = (i) => [...i.textVars, ...i.imageVars, ...i.colorVars, ...i.otherVars];
   // The brief decided which beats show real footage; the plan carries it out.
@@ -680,17 +681,27 @@ const ASPECT = { '16:9': [1920, 1080], '9:16': [1080, 1920], '1:1': [1080, 1080]
 function settingsText(options = {}) {
   const lines = [];
   if (ASPECT[options.aspect]) lines.push(`- Aspect ${options.aspect}: ${ASPECT[options.aspect].join('x')}.`);
-  if (options.duration) lines.push(`- Duration: ${options.duration} s, unless the request itself gives a length.`);
+  // The length is what the film was paid for: a length written in the request can't make it longer.
+  if (options.duration) lines.push(`- Duration: ${options.duration} s exactly (format.duration). A length written in the request does not change it; fit the request's beats into it.`);
   if (options.theme && listThemes().some((t) => t.name === options.theme)) lines.push(`- Theme preset: ${options.theme} (set look.preset).`);
   if (options.sound === false) lines.push('- Sound: off (audio "none").');
   return lines.length ? `\n\nSettings chosen in the app:\n${lines.join('\n')}` : '';
 }
 
 export function checkSettings(brief, options = {}) {
+  const errs = [];
   const want = ASPECT[options.aspect];
-  if (want && (brief.format?.width !== want[0] || brief.format?.height !== want[1])) return [`format must be ${want.join('x')} (aspect ${options.aspect} was chosen in the app)`];
-  if (options.sound === false && brief.audio !== 'none') return ['audio must be "none" (sound was turned off in the app)'];
-  return [];
+  if (want && (brief.format?.width !== want[0] || brief.format?.height !== want[1])) errs.push(`format must be ${want.join('x')} (aspect ${options.aspect} was chosen in the app)`);
+  if (options.sound === false && brief.audio !== 'none') errs.push('audio must be "none" (sound was turned off in the app)');
+  if (options.duration && Math.abs((brief.format?.duration ?? 0) - options.duration) > 0.051) errs.push(`format.duration must be ${options.duration} (the length chosen in the app); fit the beats into it`);
+  return errs;
+}
+
+// A film never runs longer than the length chosen (and paid for) in the app, whatever the request text says.
+function assertPaidLength(format, options, what) {
+  if (options.duration && !((format?.duration ?? Infinity) <= options.duration + 0.051)) {
+    throw new Error(`The ${what} runs ${format?.duration} s, longer than the ${options.duration} s chosen for this film`);
+  }
 }
 
 // dir: re-plan inside an existing job folder (a resumed job) instead of creating one.
@@ -722,6 +733,7 @@ export async function runPlan({ prompt, options = {}, onEvent = () => {}, jobsDi
     ws.writeJson('brief.raw.json', { raw: usage.lastRaw ?? null });
     throw new Error(`The model did not return a usable brief (raw reply saved to ${ws.meta('brief.raw.json')})`);
   }
+  assertPaidLength(brief.format, options, 'brief');
   ws.writeJson('brief.json', brief);
   onEvent({ type: 'brief', brief, errors: briefErrs });
 
@@ -777,6 +789,7 @@ export async function runPlan({ prompt, options = {}, onEvent = () => {}, jobsDi
     ws.writeJson('plan.raw.json', { raw: usage.lastRaw ?? null });
     throw new Error(`The model did not return a usable plan (raw reply saved to ${ws.meta('plan.raw.json')})`);
   }
+  assertPaidLength(plan.format, options, 'plan');
   ws.writeJson('plan.json', plan);
 
   // 4. Rate (code)

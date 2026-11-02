@@ -714,6 +714,17 @@ await step('registry items the request names can be adapted into a hand-built sc
   assert.match(planChecks({ theme: {}, scenes: [{ ...scene, adapt: [], components: ['code-terminal-run'] }] }, brief, sl).join(), /the request names code-typing: use it/, 'a look-alike does not count');
 });
 
+await step('a film is never longer than the length chosen in the app', async () => {
+  const { checkSettings, planChecks } = await import('../src/plan.js');
+  const brief = (duration) => ({ format: { width: 1920, height: 1080, fps: 30, duration }, audio: 'sfx', beats: [] });
+  // A free user picks 15 s and writes "make it 45 seconds": the brief must come back to 15.
+  assert.match(checkSettings(brief(45), { aspect: '16:9', duration: 15 }).join(), /format.duration must be 15/);
+  assert.deepEqual(checkSettings(brief(15), { aspect: '16:9', duration: 15 }), []);
+  // Every problem is reported at once: the brief gets one repair round.
+  assert.equal(checkSettings({ ...brief(45), format: { width: 1080, height: 1920, duration: 45 } }, { aspect: '16:9', duration: 15, sound: false }).length, 3);
+  assert.match(planChecks({ format: { duration: 45 }, scenes: [] }, brief(15), { blocks: {}, components: {} }).join(), /format.duration must be 15/);
+});
+
 await step('an effort chosen for the run reaches every role, scene writing included', async () => {
   const { config, providerForRole, useEffort } = await import('../src/config.js');
   const roles = { ...config.roles };

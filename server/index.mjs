@@ -35,6 +35,26 @@ const DB_PATH = path.join(DATA_DIR, 'db.json');
 const PORT = Number(process.env.PORT || process.env.API_PORT || 8080);
 const HOST = process.env.HOST || '0.0.0.0';
 const PUBLIC_BASE_URL = (process.env.PUBLIC_API_URL || `http://localhost:${PORT}`).replace(/\/+$/, '');
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+
+// The sites this API serves. A sign-in hands its session only to one of them, browsers may call the API only
+// from them, and payment pages return only to them; an address taken from the request is never trusted.
+const ALLOWED_ORIGINS = [
+  ...new Set(
+    [
+      ...String(process.env.FRONTEND_URL || '').split(','),
+      ...String(process.env.ALLOWED_ORIGINS || '').split(','),
+      ...(IS_PRODUCTION ? [] : ['http://localhost:3000', 'http://127.0.0.1:3000']),
+      'https://www.byreel.in',
+      'https://byreel.in',
+    ]
+      .map((o) => o.trim().replace(/\/+$/, ''))
+      .filter(Boolean)
+  ),
+];
+const allowedOrigin = (origin) => (ALLOWED_ORIGINS.includes(String(origin || '').replace(/\/+$/, '')) ? String(origin).replace(/\/+$/, '') : null);
+// The app's own address for this request: the caller's site when it is one of ours, else the main one.
+const appOrigin = (origin) => allowedOrigin(origin) || ALLOWED_ORIGINS[0];
 
 // ---------------------------------------------------------------------------
 // Google OAuth 2.0 (real sign-in: auth-code exchange + ID token verification)
@@ -48,7 +68,9 @@ const googleClient =
     : null;
 if (!googleClient) {
   console.warn(
-    '[server] GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET not set — Google sign-in will use the local dev stub (no real Google verification).'
+    IS_PRODUCTION
+      ? '[server] GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET not set — Google sign-in is off.'
+      : '[server] GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET not set — Google sign-in will use the local dev stub (no real Google verification).'
   );
 }
 
@@ -83,7 +105,8 @@ function defaultUser(overrides = {}) {
     id,
     email,
     username: email.split('@')[0] || 'creator',
-    passwordHash: overrides.passwordHash || hashPassword(overrides.password || 'Password123!'),
+    // No password given (a Google sign-up) means no password: never a default anyone could type.
+    passwordHash: overrides.passwordHash || (overrides.password ? hashPassword(overrides.password) : null),
     profile: {
       displayName,
       firstName,
@@ -205,14 +228,8 @@ function loadDb() {
   } catch (err) {
     console.warn('[server] Failed to parse db.json, initializing fresh store:', err.message);
   }
-  const seedUser = defaultUser({
-    id: 'usr_94829104',
-    email: 'creator@byreel.io',
-    name: 'Pradum Singh',
-    tier: 'pro',
-  });
   const initial = {
-    users: [seedUser],
+    users: [],
     sessions: {},
     apiKeys: [],
     promptMap: {}, // promptId -> PromptJob record
@@ -243,12 +260,95 @@ if (db.sessionSecretTag !== sessionSecretTag) {
   saveDb();
 }
 
+// Accounts made without a password (Google sign-ups, and the account this file used to seed) were given a fixed
+// default one, so anyone who knew the email could sign in with it. Once: they lose it, and their sessions end in
+// case one was opened that way. Their owners sign in with Google again.
+db.migrations ??= {};
+if (!db.migrations.noDefaultPasswords) {
+  let cleared = 0;
+  for (const u of db.users) {
+    const madeWithout = u.auth?.provider === 'google' || u.id === 'usr_94829104';
+    if (!madeWithout || !u.passwordHash || !verifyPassword('Password123!', u.passwordHash)) continue;
+    u.passwordHash = null;
+    db.revokedTokens ??= {};
+    for (const [token, id] of Object.entries(db.sessions ?? {})) {
+      if (id !== u.id) continue;
+      db.revokedTokens[token] = true;
+      delete db.sessions[token];
+    }
+    cleared += 1;
+  }
+  db.migrations.noDefaultPasswords = new Date().toISOString();
+  saveDb();
+  if (cleared) console.warn(`[server] removed the default password from ${cleared} account(s) and ended their sessions`);
+}
+
 const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
+
+// Fixed-window counters in memory (one server process): sign-in guessing, sign-up farming, email resends.
+const rateWindows = new Map();
+function rateHit(key, windowMs, now = Date.now()) {
+  const w = rateWindows.get(key);
+  if (!w || now - w.start >= windowMs) {
+    rateWindows.set(key, { start: now, n: 1, windowMs });
+    return 1;
+  }
+  return (w.n += 1);
+}
+const rateCount = (key, now = Date.now()) => {
+  const w = rateWindows.get(key);
+  return w && now - w.start < w.windowMs ? w.n : 0;
+};
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, w] of rateWindows) if (now - w.start >= w.windowMs) rateWindows.delete(k);
+}, 10 * 60 * 1000).unref();
+
+// The caller's address. Caddy is the only way in and sets X-Forwarded-For to the client it saw; its last entry
+// is the one Caddy added.
+const clientIp = (req) => String(req.headers['x-forwarded-for'] || '').split(',').pop().trim() || req.socket.remoteAddress || 'unknown';
+
+// Email verification, on once a sender is configured (Resend: RESEND_API_KEY and EMAIL_FROM). An email sign-up
+// then gets its free films only after confirming the address, so throwaway accounts can't farm free credits.
+const RESEND_API_KEY = (process.env.RESEND_API_KEY || '').trim();
+const EMAIL_FROM = (process.env.EMAIL_FROM || '').trim();
+const RESEND_API_URL = process.env.RESEND_API_URL || 'https://api.resend.com/emails'; // tests point it at a stand-in
+const emailVerificationOn = Boolean(RESEND_API_KEY && EMAIL_FROM);
+const mustVerifyEmail = (user) => emailVerificationOn && user?.auth?.emailVerified === false && !isAdmin(user);
+
+async function sendVerificationEmail(user, origin) {
+  if (!emailVerificationOn) return false;
+  const token = crypto.randomBytes(24).toString('base64url');
+  user.auth.verify = { hash: sha256(token), expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() };
+  saveDb();
+  const link = `${PUBLIC_BASE_URL}/api/verify-email?token=${token}&to=${encodeURIComponent(appOrigin(origin))}`;
+  try {
+    const res = await fetch(RESEND_API_URL, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${RESEND_API_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        from: EMAIL_FROM,
+        to: user.email,
+        subject: 'Confirm your email for byreel',
+        text: `Confirm your email to start making films:\n\n${link}\n\nThe link works for 24 hours. If you didn't sign up, ignore this email.`,
+        html: `<p>Confirm your email to start making films:</p><p><a href="${link}">Confirm my email</a></p><p>The link works for 24 hours. If you didn't sign up, ignore this email.</p>`,
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) console.error(`[server] verification email failed: ${res.status}`);
+    return res.ok;
+  } catch (err) {
+    console.error('[server] verification email failed:', err?.message || err);
+    return false;
+  }
+}
 
 function sanitizeUser(u) {
   if (!u) return null;
-  const copy = { ...u };
-  delete copy.passwordHash;
+  const { passwordHash, failedFilms, ...copy } = u;
+  // The verification link's hash stays here; the app learns only whether the email still needs confirming.
+  const { verify, ...auth } = u.auth ?? {};
+  copy.auth = { ...auth, hasPassword: Boolean(passwordHash), mustVerify: mustVerifyEmail(u) };
   // The app shows the plan the user really has (a tier stored without a Dodo payment is not one) and the
   // credits left this period.
   copy.plan = { ...u.plan, tier: effectiveTier(u), storedTier: u.plan?.tier ?? null };
@@ -257,9 +357,16 @@ function sanitizeUser(u) {
 }
 
 /** Find the user this verified Google identity belongs to, or provision one. Never trusts a client-supplied id. */
-function upsertGoogleUser({ googleId, email, name, picture, plan }) {
+// An existing account is joined by email only when Google has verified that email: otherwise a Google account
+// carrying someone else's address would sign in as them.
+function upsertGoogleUser({ googleId, email, emailVerified, name, picture, plan }) {
   const normalizedEmail = String(email || '').toLowerCase().trim();
-  let user = db.users.find((u) => u.googleId === googleId) || db.users.find((u) => u.email === normalizedEmail);
+  let user = db.users.find((u) => u.googleId === googleId);
+  if (!user) {
+    const byEmail = db.users.find((u) => u.email === normalizedEmail);
+    if (byEmail && !emailVerified) return null;
+    user = byEmail;
+  }
 
   if (user) {
     user.googleId = user.googleId || googleId;
@@ -396,7 +503,7 @@ function presentJob(job) {
   return { ...job, play: job.harnessJobId && job.play?.length ? [buildVideoUrl(job.harnessJobId)] : job.play ?? [] };
 }
 
-function syncDiskJobs() {
+function syncDiskJobs({ startup = false } = {}) {
   if (!fs.existsSync(JOBS_DIR)) return;
   const entries = fs.readdirSync(JOBS_DIR, { withFileTypes: true }).filter((e) => e.isDirectory());
 
@@ -496,8 +603,10 @@ function syncDiskJobs() {
         jobsByPromptId.set(pId, merged);
         jobsByHarnessId.set(savedJob.harnessJobId, merged); // the lists read this map: same record, same owner
       } else {
-        // If server restarted while job was running, mark it failed + retryable
-        if (savedJob.status === 'running' || savedJob.status === 'queued') {
+        // A film the last server left running or queued: failed, and retryable. Only at startup: this runs on
+        // many requests too, and a film queued right now has no folder yet but is not failed (marking it so let
+        // it be retried, and run twice).
+        if (startup && (savedJob.status === 'running' || savedJob.status === 'queued')) {
           savedJob.status = 'failed';
           savedJob.error = 'Server restarted while job was in progress. Click retry to resume.';
           savedJob.canRetry = Boolean(savedJob.harnessJobId);
@@ -508,7 +617,7 @@ function syncDiskJobs() {
   }
 }
 
-syncDiskJobs();
+syncDiskJobs({ startup: true });
 
 function persistJobRecord(job) {
   if (!job || !job.promptId) return;
@@ -522,13 +631,17 @@ function persistJobRecord(job) {
   saveDb();
 }
 
-function resolveThemeFromJob(themeFromId) {
-  if (!themeFromId) return undefined;
+// The theme of one of the caller's own films. The id is looked up, never joined into a path as given: a
+// "../" in it reached plan files outside the jobs folder.
+function resolveThemeFromJob(themeFromId, user) {
+  if (typeof themeFromId !== 'string' || !themeFromId) return undefined;
   const ref = jobsByHarnessId.get(themeFromId) || jobsByPromptId.get(themeFromId);
-  if (ref?.theme && ref.theme !== 'custom' && !ref.theme.endsWith('-custom')) {
+  if (!ref || !canSeeJob(user, ref)) return undefined;
+  if (ref.theme && ref.theme !== 'custom' && !ref.theme.endsWith('-custom')) {
     return ref.theme;
   }
-  const jobDir = path.join(JOBS_DIR, ref?.harnessJobId || themeFromId);
+  if (!/^[\w-]+$/.test(ref.harnessJobId || '')) return undefined;
+  const jobDir = path.join(JOBS_DIR, ref.harnessJobId);
   const plan = readJsonSafe(path.join(jobDir, 'harness', 'plan.json')) || readJsonSafe(path.join(jobDir, 'project', 'plan.json'));
   const name = plan?.theme?.name;
   if (name && name !== 'custom' && !name.endsWith('-custom')) return name;
@@ -887,11 +1000,13 @@ async function drainQueue() {
     job.canRetry = Boolean(job.harnessJobId);
     job.updatedAt = new Date().toISOString();
     pushLog(job, `FAILED: ${job.error}`);
-    // A film that failed costs nothing.
-    if (refund(db.users.find((u) => u.id === job.userId), job)) {
+    // A film that failed costs nothing; failures are counted, since each one spent model money.
+    const owner = db.users.find((u) => u.id === job.userId);
+    if (owner) owner.failedFilms = [...recentFailures(owner), new Date().toISOString()];
+    if (refund(owner, job)) {
       pushLog(job, `Refunded ${job.credits} credits`);
-      saveDb();
     }
+    saveDb();
     persistJobRecord(job);
   } finally {
     activeAbortControllers.delete(job.promptId);
@@ -904,10 +1019,13 @@ async function drainQueue() {
 // HTTP Helpers (CORS, Cookies, JSON Body Parser, Auth Resolution)
 // ---------------------------------------------------------------------------
 
+// Browsers may call the API with credentials only from the app's own sites. Server-to-server callers with an
+// API key send no Origin and need no CORS.
 function setCorsHeaders(req, res) {
-  const origin = req.headers.origin || 'http://localhost:3000';
-  res.setHeader('Access-Control-Allow-Origin', origin);
   res.setHeader('Vary', 'Origin');
+  const origin = allowedOrigin(req.headers.origin);
+  if (!origin) return;
+  res.setHeader('Access-Control-Allow-Origin', origin);
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader(
     'Access-Control-Allow-Headers',
@@ -953,26 +1071,58 @@ function parseCookies(req) {
   return out;
 }
 
-function setAuthCookies(res, token) {
+// Session cookies page scripts can't read, sent only over HTTPS when the API is served over it.
+const COOKIE_FLAGS = `Path=/; SameSite=Lax; HttpOnly${PUBLIC_BASE_URL.startsWith('https://') ? '; Secure' : ''}`;
+
+function setAuthCookies(res, token, extra = []) {
   const maxAge = 60 * 60 * 24 * 7;
   res.setHeader('Set-Cookie', [
-    `token=${encodeURIComponent(token)}; Path=/; Max-Age=${maxAge}; SameSite=Lax`,
-    `animagent_token=${encodeURIComponent(token)}; Path=/; Max-Age=${maxAge}; SameSite=Lax`,
+    `token=${encodeURIComponent(token)}; Max-Age=${maxAge}; ${COOKIE_FLAGS}`,
+    `animagent_token=${encodeURIComponent(token)}; Max-Age=${maxAge}; ${COOKIE_FLAGS}`,
+    ...extra,
   ]);
 }
 
 function clearAuthCookies(res) {
-  res.setHeader('Set-Cookie', [
-    'token=; Path=/; Max-Age=0; SameSite=Lax',
-    'animagent_token=; Path=/; Max-Age=0; SameSite=Lax',
-  ]);
+  res.setHeader('Set-Cookie', [`token=; Max-Age=0; ${COOKIE_FLAGS}`, `animagent_token=; Max-Age=0; ${COOKIE_FLAGS}`]);
 }
 
-function getAuthenticatedUser(req) {
+// Google sign-in state: signed so its origin and plan can't be swapped, and short-lived. Its nonce must match
+// the cookie set when this browser started the sign-in.
+const GOOGLE_STATE_TTL_MS = 15 * 60 * 1000;
+const googleStateMac = (body) => crypto.createHmac('sha256', JWT_SECRET).update(`google-state:${body}`).digest('base64url');
+
+function signGoogleState(data) {
+  const body = Buffer.from(JSON.stringify(data)).toString('base64url');
+  return `${body}.${googleStateMac(body)}`;
+}
+
+function readGoogleState(state) {
+  const [body, mac] = String(state || '').split('.');
+  if (!body || !mac) return null;
+  const want = Buffer.from(googleStateMac(body));
+  const given = Buffer.from(mac);
+  if (given.length !== want.length || !crypto.timingSafeEqual(given, want)) return null;
+  try {
+    const data = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    return Date.now() - Number(data.iat) < GOOGLE_STATE_TTL_MS ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+const googleNonceCookie = (nonce, maxAgeS) => `g_nonce=${nonce}; Max-Age=${Math.round(maxAgeS)}; ${COOKIE_FLAGS}`;
+
+// The session token a request carries: a bearer header, or the session cookie.
+function currentToken(req) {
   const authHeader = req.headers.authorization || '';
   const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
   const cookies = parseCookies(req);
-  const token = bearer || cookies.token || cookies.animagent_token || null;
+  return bearer || cookies.token || cookies.animagent_token || null;
+}
+
+function getAuthenticatedUser(req) {
+  const token = currentToken(req);
 
   if (token) {
     // 1. Check if token was explicitly revoked
@@ -1036,7 +1186,7 @@ function readRawBody(req, maxBytes = 1024 * 1024) {
 
 // Where the browser app lives, for checkout and portal return links.
 function frontendUrl(req) {
-  return (process.env.FRONTEND_URL || req.headers.origin || 'http://localhost:3000').replace(/\/+$/, '');
+  return appOrigin(req.headers.origin);
 }
 
 function readBody(req, maxBytes = 15 * 1024 * 1024) {
@@ -1155,11 +1305,117 @@ function buildGlyphsForText(text, fontSize = 120, effect = 'kinetic_split', phys
   };
 }
 
+// The models a film may run on: what the Studio picker offers. A model id from the request alone could be any
+// model on the owner's keys, at any price, so nothing outside this list (or the provider's configured default)
+// runs. The pricier ones need a paid plan.
+const MODEL_CATALOG = [
+  {
+    provider: 'azure',
+    name: 'Azure AI',
+    models: [
+      { id: 'gpt-5-mini', name: 'GPT-5 Mini', tag: 'Serverless MaaS', defaultEffort: 'high', efforts: ['low', 'medium', 'high', 'max'], description: 'Fast concise reasoning & swift logic' },
+      { id: 'DeepSeek-V4-Pro', name: 'DeepSeek V4 Pro', tag: 'Serverless MaaS', defaultEffort: 'high', efforts: ['low', 'medium', 'high', 'max'], description: 'Fast code generation and animation scripting' }
+    ]
+  },
+  {
+    provider: 'glm',
+    name: 'Zhipu GLM',
+    models: [
+      { id: 'glm-5.3-flash', name: 'GLM 5.3 Flash', tag: 'Ultra Fast', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'High speed Chinese/English multimodal reasoning' },
+      { id: 'glm-4.6', name: 'GLM 4.6', tag: 'Standard', defaultEffort: 'low', efforts: ['low', 'medium'], description: 'Standard GLM model' }
+    ]
+  },
+  {
+    provider: 'claude',
+    name: 'Anthropic Claude',
+    models: [
+      { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', paid: true, tag: 'Top Tier Visuals', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'State of the art layout, typography & canvas aesthetics' }
+    ]
+  },
+  {
+    provider: 'openai',
+    name: 'OpenAI GPT',
+    models: [
+      { id: 'gpt-5-mini', name: 'GPT-5 Mini', tag: 'Reasoning', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'Fast concise reasoning' },
+      { id: 'gpt-4o', name: 'GPT-4o', paid: true, tag: 'Omni', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'Multimodal flagship' }
+    ]
+  },
+  {
+    provider: 'openrouter',
+    name: 'OpenRouter',
+    models: [
+      { id: 'deepseek/deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', tag: 'Fast · low cost', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: 'Strong motion code for cents a film; low is quickest, high thinks longest' },
+      { id: 'inclusionai/ling-3.0-flash-vl', name: 'Ling 3.0 Flash VL', tag: 'Vision · experimental', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: 'Cheaper and sees images; one upstream provider, so it can be rate-limited' }
+    ]
+  },
+  {
+    provider: 'gemini',
+    name: 'Google Gemini',
+    models: [
+      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', tag: 'Multimodal', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'Long context fast prototyping' }
+    ]
+  }
+];
+
+// The provider, model and effort a film request may run on, or why not.
+function chooseModel(user, body) {
+  const provider = body.provider || config.roles.builder || 'azure';
+  const group = MODEL_CATALOG.find((g) => g.provider === provider);
+  if (!group) return { status: 400, code: 'UNKNOWN_MODEL', message: `Unknown provider "${String(provider).slice(0, 40)}".` };
+  const configured = config.providers[provider]?.model;
+  const model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : configured || group.models[0].id;
+  const entry = group.models.find((m) => m.id === model);
+  if (!entry && model !== configured) {
+    return { status: 400, code: 'UNKNOWN_MODEL', message: `"${model.slice(0, 60)}" is not one of the Studio's models.` };
+  }
+  if (entry?.paid && effectiveTier(user) === 'free') {
+    return { status: 402, code: 'PLAN_LIMIT', message: `${entry.name} needs a paid plan.`, tier: 'free', upgradeUrl: '/pricing' };
+  }
+  const efforts = entry?.efforts ?? ['low', 'medium', 'high', 'xhigh', 'max'];
+  let effort = efforts.includes(body.effort) ? body.effort : entry?.defaultEffort || config.providers[provider]?.effort || 'high';
+  if (effort === 'max') effort = 'xhigh';
+  return { provider, model, effort };
+}
+
+// Limits that keep one account from crowding out everyone else or spending model money on films that are
+// refunded: films running or queued at once, and failed (refunded) films a day. Admins are exempt.
+const MAX_PROMPT_CHARS = 4000;
+const ACTIVE_FILMS = { free: 1, creator: 2, pro: 3, enterprise: 3 };
+const FAILED_FILMS_PER_DAY = 6;
+const MAX_RETRIES = 3;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const recentFailures = (user, now = Date.now()) => (user.failedFilms ?? []).filter((t) => now - Date.parse(t) < DAY_MS);
+
+function filmLimit(user) {
+  if (isAdmin(user)) return null;
+  if (mustVerifyEmail(user) && effectiveTier(user) === 'free') {
+    return { status: 403, code: 'EMAIL_UNVERIFIED', message: `Confirm your email to make films: open the link we sent to ${user.email}.` };
+  }
+  let active = 0;
+  for (const j of jobsByPromptId.values()) if (j.userId === user.id && (j.status === 'running' || j.status === 'queued')) active += 1;
+  const max = ACTIVE_FILMS[effectiveTier(user)] ?? 1;
+  if (active >= max) return { status: 429, code: 'TOO_MANY_ACTIVE', message: `You have ${active} film${active === 1 ? '' : 's'} in progress. Wait for ${active === 1 ? 'it' : 'one'} to finish.` };
+  if (recentFailures(user).length >= FAILED_FILMS_PER_DAY) return { status: 429, code: 'TOO_MANY_FAILURES', message: 'Too many films failed today. Try again tomorrow, or contact support.' };
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Route Handler
 // ---------------------------------------------------------------------------
 
+// On every response. The API serves JSON, media and the sign-in popup page (which sets its own script policy):
+// nothing may frame it, guess its content types, or load anything into its responses.
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'no-referrer',
+  'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+  ...(PUBLIC_BASE_URL.startsWith('https://') ? { 'Strict-Transport-Security': 'max-age=31536000; includeSubDomains' } : {}),
+};
+
 const server = http.createServer(async (req, res) => {
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) res.setHeader(name, value);
   try {
     if (req.method === 'OPTIONS') {
       setCorsHeaders(req, res);
@@ -1175,6 +1431,12 @@ const server = http.createServer(async (req, res) => {
     // 1. HEALTH & HARNESS STATUS ENDPOINTS
     // =========================================================================
     if ((pathname === '/' || pathname === '/health' || pathname === '/api/health') && method === 'GET') {
+      // Public: up or not. Folders, keys' providers, models and the queue are for admins, and for a call from
+      // inside the container (deploy scripts), which comes from loopback without a proxy header.
+      const local = ['::1', '127.0.0.1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress) && !req.headers['x-forwarded-for'];
+      if (!local && !isAdmin(getAuthenticatedUser(req))) {
+        return sendJson(req, res, 200, { success: true, status: 'ok', service: 'byreel-motion-studio-backend' });
+      }
       syncDiskJobs();
       let activeModels = {};
       for (const role of ['planner', 'builder', 'critic', 'fixer']) {
@@ -1202,60 +1464,7 @@ const server = http.createServer(async (req, res) => {
 
     if ((pathname === '/api/providers' || pathname === '/api/models') && method === 'GET') {
       const statusList = providerStatus();
-      const catalog = [
-        {
-          provider: 'azure',
-          name: 'Azure AI',
-          ready: statusList.find((p) => p.name === 'azure')?.ready ?? false,
-          models: [
-            { id: 'gpt-5-mini', name: 'GPT-5 Mini', tag: 'Serverless MaaS', defaultEffort: 'high', efforts: ['low', 'medium', 'high', 'max'], description: 'Fast concise reasoning & swift logic' },
-            { id: 'DeepSeek-V4-Pro', name: 'DeepSeek V4 Pro', tag: 'Serverless MaaS', defaultEffort: 'high', efforts: ['low', 'medium', 'high', 'max'], description: 'Fast code generation and animation scripting' }
-          ]
-        },
-        {
-          provider: 'glm',
-          name: 'Zhipu GLM',
-          ready: statusList.find((p) => p.name === 'glm')?.ready ?? false,
-          models: [
-            { id: 'glm-5.3-flash', name: 'GLM 5.3 Flash', tag: 'Ultra Fast', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'High speed Chinese/English multimodal reasoning' },
-            { id: 'glm-4.6', name: 'GLM 4.6', tag: 'Standard', defaultEffort: 'low', efforts: ['low', 'medium'], description: 'Standard GLM model' }
-          ]
-        },
-        {
-          provider: 'claude',
-          name: 'Anthropic Claude',
-          ready: statusList.find((p) => p.name === 'claude')?.ready ?? false,
-          models: [
-            { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', tag: 'Top Tier Visuals', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'State of the art layout, typography & canvas aesthetics' }
-          ]
-        },
-        {
-          provider: 'openai',
-          name: 'OpenAI GPT',
-          ready: statusList.find((p) => p.name === 'openai')?.ready ?? false,
-          models: [
-            { id: 'gpt-5-mini', name: 'GPT-5 Mini', tag: 'Reasoning', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'Fast concise reasoning' },
-            { id: 'gpt-4o', name: 'GPT-4o', tag: 'Omni', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'Multimodal flagship' }
-          ]
-        },
-        {
-          provider: 'openrouter',
-          name: 'OpenRouter',
-          ready: statusList.find((p) => p.name === 'openrouter')?.ready ?? false,
-          models: [
-            { id: 'deepseek/deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', tag: 'Fast · low cost', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: 'Strong motion code for cents a film; low is quickest, high thinks longest' },
-            { id: 'inclusionai/ling-3.0-flash-vl', name: 'Ling 3.0 Flash VL', tag: 'Vision · experimental', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'], description: 'Cheaper and sees images; one upstream provider, so it can be rate-limited' }
-          ]
-        },
-        {
-          provider: 'gemini',
-          name: 'Google Gemini',
-          ready: statusList.find((p) => p.name === 'gemini')?.ready ?? false,
-          models: [
-            { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', tag: 'Multimodal', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'Long context fast prototyping' }
-          ]
-        }
-      ];
+      const catalog = MODEL_CATALOG.map((group) => ({ ...group, ready: statusList.find((p) => p.name === group.provider)?.ready ?? false }));
 
       return sendJson(req, res, 200, {
         success: true,
@@ -1280,18 +1489,25 @@ const server = http.createServer(async (req, res) => {
     // 2. AUTHENTICATION & USER SESSION ENDPOINTS
     // =========================================================================
     if (pathname === '/api/login' && method === 'POST') {
-      const body = await readBody(req);
+      const body = await readBody(req, 64 * 1024);
       const email = String(body.email || '').toLowerCase().trim();
       const password = String(body.password || '');
 
       if (!email || !password) {
         return sendError(req, res, 400, 'Email and password are required.', 'VALIDATION_ERROR');
       }
+      // Password guessing: a handful of wrong passwords per account, and a cap per network, per 15 minutes.
+      const loginWindowMs = 15 * 60 * 1000;
+      if (rateHit(`login:${clientIp(req)}`, loginWindowMs) > 30 || rateCount(`login-fail:${email}`) >= 8) {
+        return sendError(req, res, 429, 'Too many sign-in attempts. Please wait 15 minutes and try again.', 'TOO_MANY_ATTEMPTS');
+      }
+      const failed = () => {
+        rateHit(`login-fail:${email}`, loginWindowMs);
+        return sendError(req, res, 401, 'Invalid email or password.', 'INVALID_CREDENTIALS');
+      };
 
       const user = db.users.find((u) => u.email === email);
-      if (!user) {
-        return sendError(req, res, 401, 'Invalid email or password.', 'INVALID_CREDENTIALS');
-      }
+      if (!user || password.length > 200) return failed();
 
       // Check if account was created via Google and has no password configured
       if (!user.passwordHash) {
@@ -1306,9 +1522,7 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
-      if (!verifyPassword(password, user.passwordHash)) {
-        return sendError(req, res, 401, 'Invalid email or password.', 'INVALID_CREDENTIALS');
-      }
+      if (!verifyPassword(password, user.passwordHash)) return failed();
 
       // Upgrade legacy password hash to modern scrypt hash seamlessly
       if (user.passwordHash && !user.passwordHash.startsWith('scrypt:')) {
@@ -1330,14 +1544,23 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/api/register' && method === 'POST') {
-      const body = await readBody(req);
+      const body = await readBody(req, 64 * 1024);
       const email = String(body.email || '').toLowerCase().trim();
       const password = String(body.password || '');
       const name = String(body.name || email.split('@')[0] || 'Studio Creator').trim();
       const plan = String(body.plan || 'pro').toLowerCase();
 
+      // Sign-ups from one address: a few accounts a day, so free credits can't be farmed by script.
+      const ip = clientIp(req);
+      if (rateHit(`register:${ip}`, 60 * 60 * 1000) > 20 || rateCount(`accounts:${ip}`) >= 5) {
+        return sendError(req, res, 429, 'Too many sign-ups from this network. Please try again later.', 'TOO_MANY_ATTEMPTS');
+      }
+
       if (!email || !password || !name) {
         return sendError(req, res, 400, 'Name, email, and password are required.', 'VALIDATION_ERROR');
+      }
+      if (email.length > 254 || name.length > 80 || password.length > 200) {
+        return sendError(req, res, 400, 'Name, email or password is too long.', 'VALIDATION_ERROR');
       }
 
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -1371,51 +1594,99 @@ const server = http.createServer(async (req, res) => {
       const user = defaultUser({ email, name, password, provider: 'email' });
       // The plan picked on the pricing page is remembered for checkout, never granted.
       if (['creator', 'pro', 'enterprise'].includes(plan)) user.plan.intended = plan;
-      user.passwordHash = hashPassword(password);
+      // Unconfirmed until the owner clicks the emailed link (an admin email or a payment's email match needs it).
+      user.auth.emailVerified = false;
       db.users.push(user);
+      rateHit(`accounts:${ip}`, 24 * 60 * 60 * 1000);
 
       const token = createToken(user.id);
       db.sessions[token] = user.id;
       saveDb();
+      const sent = await sendVerificationEmail(user, req.headers.origin);
 
       setAuthCookies(res, token);
       return sendJson(req, res, 201, {
         success: true,
-        message: 'Account created successfully',
+        message: sent ? 'Account created. Check your inbox to confirm your email.' : 'Account created successfully',
         token,
         user: sanitizeUser(user),
       });
     }
 
+    // The link in the verification email: confirms the address, then returns to the app.
+    if (pathname === '/api/verify-email' && method === 'GET') {
+      const token = parsedUrl.searchParams.get('token') || '';
+      const to = appOrigin(parsedUrl.searchParams.get('to'));
+      const hash = sha256(token);
+      const user = token && db.users.find((u) => u.auth?.verify?.hash === hash && Date.parse(u.auth.verify.expiresAt) > Date.now());
+      if (!user) {
+        res.writeHead(302, { Location: `${to}/login?error=${encodeURIComponent('This confirmation link has expired. Sign in to get a new one.')}` });
+        return res.end();
+      }
+      user.auth.emailVerified = true;
+      delete user.auth.verify;
+      saveDb();
+      res.writeHead(302, { Location: `${to}/dashboard?verified=1` });
+      return res.end();
+    }
+
+    if (pathname === '/api/verify-email/resend' && method === 'POST') {
+      const user = getAuthenticatedUser(req);
+      if (!user) return sendError(req, res, 401, 'Please sign in first.', 'UNAUTHORIZED');
+      if (!mustVerifyEmail(user)) return sendJson(req, res, 200, { success: true, message: 'Your email is already confirmed.' });
+      if (rateHit(`verify-resend:${user.id}`, 60 * 60 * 1000) > 3) {
+        return sendError(req, res, 429, 'We sent a few links already. Check your inbox and spam, or try again in an hour.', 'TOO_MANY_ATTEMPTS');
+      }
+      const sent = await sendVerificationEmail(user, req.headers.origin);
+      if (!sent) return sendError(req, res, 502, 'Could not send the email right now. Please try again shortly.', 'EMAIL_FAILED');
+      return sendJson(req, res, 200, { success: true, message: `We sent a new link to ${user.email}.` });
+    }
+
     if (pathname === '/api/google/url' && method === 'GET') {
-      const origin = parsedUrl.searchParams.get('origin') || 'http://localhost:3000';
+      const origin = appOrigin(parsedUrl.searchParams.get('origin'));
       const mode = parsedUrl.searchParams.get('mode') || 'login';
       const plan = parsedUrl.searchParams.get('plan') || 'pro';
       const url = `${PUBLIC_BASE_URL}/api/google/auth?origin=${encodeURIComponent(origin)}&mode=${encodeURIComponent(mode)}&plan=${encodeURIComponent(plan)}&popup=true`;
       return sendJson(req, res, 200, { success: true, url });
     }
 
-    // Where a full-page (non-popup) redirect hands the session to the frontend's own callback page,
-    // which reads `token` from the URL and fetches the profile itself (see app/auth/callback).
+    // Where a full-page (non-popup) redirect hands the session to the frontend's own callback page, which
+    // reads `token` and fetches the profile itself (see app/auth/callback). The token rides in the fragment,
+    // which browsers never send to a server or put in a Referer.
     function authCallbackUrl(origin, token, user) {
       const name = encodeURIComponent(user?.profile?.displayName || user?.email?.split('@')[0] || 'Creator');
-      return `${origin}/auth/callback?token=${encodeURIComponent(token)}&name=${name}`;
+      return `${origin}/auth/callback#token=${encodeURIComponent(token)}&name=${name}`;
     }
 
-    function googlePopupHtml({ type, token, user, message, origin, fallbackUrl }) {
+    // JSON that is safe inside a <script>: a "</script>" in a name or message can't end the block.
+    const scriptJson = (value) => JSON.stringify(value).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+
+    // The page the sign-in popup ends on. Its one inline script runs by nonce; nothing else may load.
+    function sendPopup(res, opts, headers = {}) {
+      const nonce = crypto.randomBytes(16).toString('base64');
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'Content-Security-Policy': `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'`,
+        ...headers,
+      });
+      return res.end(googlePopupHtml({ ...opts, nonce }));
+    }
+
+    function googlePopupHtml({ type, token, user, message, origin, fallbackUrl, nonce }) {
       const payload = type === 'GOOGLE_AUTH_SUCCESS' ? { type, token, user: sanitizeUser(user) } : { type, message };
       return `<!doctype html>
 <html>
   <head><meta charset="utf-8"><title>${type === 'GOOGLE_AUTH_SUCCESS' ? 'Signed in' : 'Sign-in failed'}</title></head>
   <body style="background:#111110;color:#fcfbf7;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
-    <script>
+    <script nonce="${nonce}">
       (function() {
-        var payload = ${JSON.stringify(payload)};
+        var payload = ${scriptJson(payload)};
         if (window.opener) {
-          window.opener.postMessage(payload, ${JSON.stringify(origin)});
+          window.opener.postMessage(payload, ${scriptJson(origin)});
           window.close();
         } else {
-          window.location.href = ${JSON.stringify(fallbackUrl)};
+          window.location.href = ${scriptJson(fallbackUrl)};
         }
       })();
     </script>
@@ -1425,21 +1696,26 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/api/google/auth' && method === 'GET') {
-      const origin = parsedUrl.searchParams.get('origin') || 'http://localhost:3000';
+      const origin = appOrigin(parsedUrl.searchParams.get('origin'));
       const mode = parsedUrl.searchParams.get('mode') || 'login';
       const plan = parsedUrl.searchParams.get('plan') || 'free';
       const popup = parsedUrl.searchParams.get('popup') === 'true';
 
-      // Real Google OAuth: send the browser to Google's own consent screen.
+      // Real Google OAuth: send the browser to Google's own consent screen. The state is signed, and its nonce
+      // is also left in this browser as a cookie, so a callback finishes only the sign-in this browser began.
       if (googleClient) {
-        const state = Buffer.from(JSON.stringify({ origin, mode, plan, popup })).toString('base64url');
+        const nonce = crypto.randomBytes(16).toString('base64url');
         const authUrl = googleClient.generateAuthUrl({
           access_type: 'online',
           scope: ['openid', 'email', 'profile'],
-          state,
+          state: signGoogleState({ origin, mode, plan, popup, nonce, iat: Date.now() }),
           prompt: 'select_account',
         });
-        res.writeHead(302, { Location: authUrl });
+        res.writeHead(302, { Location: authUrl, 'Set-Cookie': googleNonceCookie(nonce, GOOGLE_STATE_TTL_MS / 1000) });
+        return res.end();
+      }
+      if (IS_PRODUCTION) {
+        res.writeHead(302, { Location: `${origin}/login?error=${encodeURIComponent('Google sign-in is not available right now.')}` });
         return res.end();
       }
 
@@ -1455,17 +1731,13 @@ const server = http.createServer(async (req, res) => {
       setAuthCookies(res, token);
 
       if (popup) {
-        setCorsHeaders(req, res);
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        return res.end(
-          googlePopupHtml({
-            type: 'GOOGLE_AUTH_SUCCESS',
-            token,
-            user,
-            origin,
-            fallbackUrl: authCallbackUrl(origin, token, user),
-          })
-        );
+        return sendPopup(res, {
+          type: 'GOOGLE_AUTH_SUCCESS',
+          token,
+          user,
+          origin,
+          fallbackUrl: authCallbackUrl(origin, token, user),
+        });
       }
       res.writeHead(302, { Location: authCallbackUrl(origin, token, user) });
       return res.end();
@@ -1475,33 +1747,24 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/google/callback' && method === 'GET') {
       const code = parsedUrl.searchParams.get('code');
       const oauthError = parsedUrl.searchParams.get('error');
-      let state = { origin: 'http://localhost:3000', mode: 'login', plan: 'free', popup: true };
-      try {
-        state = { ...state, ...JSON.parse(Buffer.from(parsedUrl.searchParams.get('state') || '', 'base64url').toString('utf8')) };
-      } catch {
-        // malformed state: fall back to defaults above
-      }
+      const signed = readGoogleState(parsedUrl.searchParams.get('state'));
+      // A forged, stale or tampered state is ignored entirely; its origin in particular is never used.
+      const state = { mode: 'login', plan: 'free', popup: true, ...(signed || {}), origin: appOrigin(signed?.origin) };
+      const nonceCookie = parseCookies(req).g_nonce;
+      const sameBrowser = Boolean(signed?.nonce && nonceCookie && nonceCookie === signed.nonce);
 
       const fail = (message) => {
         const errorUrl = `${state.origin}/login?error=${encodeURIComponent(message)}`;
         if (state.popup === false) {
-          res.writeHead(302, { Location: errorUrl });
+          res.writeHead(302, { Location: errorUrl, 'Set-Cookie': googleNonceCookie('', 0) });
           return res.end();
         }
-        setCorsHeaders(req, res);
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        return res.end(
-          googlePopupHtml({
-            type: 'GOOGLE_AUTH_ERROR',
-            message,
-            origin: state.origin,
-            fallbackUrl: errorUrl,
-          })
-        );
+        return sendPopup(res, { type: 'GOOGLE_AUTH_ERROR', message, origin: state.origin, fallbackUrl: errorUrl }, { 'Set-Cookie': googleNonceCookie('', 0) });
       };
 
       if (oauthError) return fail('Google sign-in was cancelled.');
       if (!code || !googleClient) return fail('Google sign-in is not configured on this server.');
+      if (!sameBrowser) return fail('This sign-in link has expired. Please start again.');
 
       try {
         const { tokens } = await googleClient.getToken(code);
@@ -1512,16 +1775,18 @@ const server = http.createServer(async (req, res) => {
         const user = upsertGoogleUser({
           googleId: payload.sub,
           email: payload.email,
+          emailVerified: payload.email_verified === true,
           name: payload.name,
           picture: payload.picture,
           plan: state.plan,
         });
+        if (!user) return fail('This email already has an account. Sign in with your password.');
         if (payload.email_verified) user.auth.emailVerified = true;
 
         const token = createToken(user.id);
         db.sessions[token] = user.id;
         saveDb();
-        setAuthCookies(res, token);
+        setAuthCookies(res, token, [googleNonceCookie('', 0)]);
 
         const targetCallbackUrl = authCallbackUrl(state.origin, token, user);
 
@@ -1530,17 +1795,13 @@ const server = http.createServer(async (req, res) => {
           return res.end();
         }
 
-        setCorsHeaders(req, res);
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        return res.end(
-          googlePopupHtml({
-            type: 'GOOGLE_AUTH_SUCCESS',
-            token,
-            user,
-            origin: state.origin,
-            fallbackUrl: targetCallbackUrl,
-          })
-        );
+        return sendPopup(res, {
+          type: 'GOOGLE_AUTH_SUCCESS',
+          token,
+          user,
+          origin: state.origin,
+          fallbackUrl: targetCallbackUrl,
+        });
       } catch (err) {
         console.error('[server] Google OAuth callback failed:', err?.message || err);
         return fail('Could not complete Google sign-in.');
@@ -1548,7 +1809,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if ((pathname === '/api/google' || pathname === '/api/google/register') && method === 'POST') {
-      const body = await readBody(req);
+      const body = await readBody(req, 64 * 1024);
       const plan = body.plan || 'free';
 
       if (googleClient) {
@@ -1563,10 +1824,12 @@ const server = http.createServer(async (req, res) => {
           const user = upsertGoogleUser({
             googleId: payload.sub,
             email: payload.email,
+            emailVerified: payload.email_verified === true,
             name: payload.name,
             picture: payload.picture,
             plan,
           });
+          if (!user) return sendError(req, res, 409, 'This email already has an account. Sign in with your password.', 'EMAIL_IN_USE');
           if (payload.email_verified) user.auth.emailVerified = true;
 
           const token = createToken(user.id);
@@ -1583,6 +1846,7 @@ const server = http.createServer(async (req, res) => {
           return sendError(req, res, 401, 'Could not verify Google credential.', 'UNAUTHORIZED');
         }
       }
+      if (IS_PRODUCTION) return sendError(req, res, 503, 'Google sign-in is not available right now.', 'GOOGLE_NOT_CONFIGURED');
 
       // No Google credentials configured: local-dev stub.
       let user = db.users[0];
@@ -1641,8 +1905,32 @@ const server = http.createServer(async (req, res) => {
 
       const body = await readBody(req);
 
+      // A new email or password needs the current password: a stolen session alone can't take the account. The
+      // checks come before any change, so a refused request changes nothing.
+      const newEmail = typeof body.email === 'string' ? body.email.toLowerCase().trim() : '';
+      const changingEmail = Boolean(newEmail) && newEmail !== user.email;
+      if (changingEmail || body.newPassword) {
+        if (!user.passwordHash) {
+          return sendError(req, res, 400, 'This account signs in with Google, so its email and password come from Google.', 'USE_GOOGLE_AUTH');
+        }
+        if (!body.currentPassword || !verifyPassword(String(body.currentPassword), user.passwordHash)) {
+          return sendError(req, res, 400, 'Current password is incorrect.', 'INVALID_PASSWORD');
+        }
+      }
+      if (changingEmail) {
+        if (newEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) {
+          return sendError(req, res, 400, 'Please enter a valid email address.', 'VALIDATION_ERROR');
+        }
+        if (db.users.some((u) => u.email === newEmail && u.id !== user.id)) {
+          return sendError(req, res, 409, 'An account with this email address already exists.', 'EMAIL_IN_USE');
+        }
+      }
+      if (body.newPassword && (String(body.newPassword).length < 8 || String(body.newPassword).length > 200)) {
+        return sendError(req, res, 400, 'New password must be 8 to 200 characters long.', 'WEAK_PASSWORD');
+      }
+
       if (body.displayName && typeof body.displayName === 'string') {
-        const trimmed = body.displayName.trim();
+        const trimmed = body.displayName.trim().slice(0, 80);
         if (trimmed.length > 0) {
           user.profile.displayName = trimmed;
           const parts = trimmed.split(/\s+/);
@@ -1651,47 +1939,39 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
-      if (body.email && typeof body.email === 'string') {
-        const newEmail = body.email.toLowerCase().trim();
-        if (newEmail !== user.email) {
-          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) {
-            return sendError(req, res, 400, 'Please enter a valid email address.', 'VALIDATION_ERROR');
-          }
-          const existing = db.users.find((u) => u.email === newEmail && u.id !== user.id);
-          if (existing) {
-            return sendError(req, res, 409, 'An account with this email address already exists.', 'EMAIL_IN_USE');
-          }
-          user.email = newEmail;
-        }
+      if (changingEmail) {
+        user.email = newEmail;
+        // A new address is unconfirmed until its owner clicks the link sent to it.
+        user.auth.emailVerified = false;
       }
 
       if (body.company !== undefined) {
-        user.profile.company = String(body.company).trim();
+        user.profile.company = String(body.company).trim().slice(0, 120);
       }
 
       if (body.bio !== undefined || body.role !== undefined) {
-        user.profile.bio = String(body.bio ?? body.role ?? '').trim();
+        user.profile.bio = String(body.bio ?? body.role ?? '').trim().slice(0, 500);
       }
 
       if (body.avatarUrl !== undefined) {
         user.profile.avatarUrl = String(body.avatarUrl).trim() || null;
       }
 
-      // Password change support
-      if (body.newPassword) {
-        const newPw = String(body.newPassword);
-        if (newPw.length < 8) {
-          return sendError(req, res, 400, 'New password must be at least 8 characters long.', 'WEAK_PASSWORD');
+      if (body.newPassword) user.passwordHash = hashPassword(String(body.newPassword));
+
+      // A new email or password ends every other session of this account.
+      if (changingEmail || body.newPassword) {
+        const current = currentToken(req);
+        db.revokedTokens ??= {};
+        for (const [token, id] of Object.entries(db.sessions ?? {})) {
+          if (id !== user.id || token === current) continue;
+          db.revokedTokens[token] = true;
+          delete db.sessions[token];
         }
-        if (user.passwordHash) {
-          if (!body.currentPassword || !verifyPassword(body.currentPassword, user.passwordHash)) {
-            return sendError(req, res, 400, 'Current password is incorrect.', 'INVALID_PASSWORD');
-          }
-        }
-        user.passwordHash = hashPassword(newPw);
       }
 
       saveDb();
+      if (changingEmail) await sendVerificationEmail(user, req.headers.origin);
       return sendJson(req, res, 200, {
         success: true,
         message: 'Profile updated successfully',
@@ -1743,6 +2023,9 @@ const server = http.createServer(async (req, res) => {
       if (!prompt) {
         return sendError(req, res, 400, 'Field "prompt" is required and must be a non-empty string.', 'EMPTY_PROMPT');
       }
+      if (prompt.length > MAX_PROMPT_CHARS) {
+        return sendError(req, res, 400, `Keep the request under ${MAX_PROMPT_CHARS.toLocaleString('en-US')} characters (this one has ${prompt.length.toLocaleString('en-US')}).`, 'PROMPT_TOO_LONG');
+      }
 
       const promptId =
         typeof body.promptId === 'string' && body.promptId.trim()
@@ -1764,7 +2047,18 @@ const server = http.createServer(async (req, res) => {
       const durationS = Number.isFinite(Number(body.length))
         ? Math.max(5, Math.min(60, Math.round(Number(body.length))))
         : 15;
-      const inheritedTheme = resolveThemeFromJob(body.themeFrom);
+      const inheritedTheme = resolveThemeFromJob(body.themeFrom, user);
+
+      // Only a model from the Studio list, and the pricier ones only on a paid plan.
+      const choice = chooseModel(user, body);
+      if (choice.code) {
+        const { status, ...rest } = choice;
+        return sendJson(req, res, status, { success: false, error: choice.code, ...rest });
+      }
+      let { provider, model, effort } = choice;
+
+      const limited = filmLimit(user);
+      if (limited) return sendError(req, res, limited.status, limited.message, limited.code);
 
       // The paywall: the plan's longest film and the credits left this period.
       const blocked = paywall(user, durationS);
@@ -1772,14 +2066,6 @@ const server = http.createServer(async (req, res) => {
         saveDb();
         return sendJson(req, res, 402, { success: false, error: blocked.code, ...blocked });
       }
-
-      // Model & Provider selection from frontend
-      const validProviders = ['azure', 'glm', 'claude', 'openai', 'gemini', 'openrouter'];
-      let provider = validProviders.includes(body.provider) ? body.provider : (config.roles.builder || 'azure');
-      let model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : (config.providers[provider]?.model || 'gpt-5-mini');
-      const validEfforts = ['low', 'medium', 'high', 'xhigh', 'max'];
-      let effort = validEfforts.includes(body.effort) ? body.effort : (config.providers[provider]?.effort || 'high');
-      if (effort === 'max') effort = 'xhigh';
 
       // Smart routing: if gpt-5-mini is requested and openai key is absent, use azure deployment
       if (model === 'gpt-5-mini' && provider === 'openai' && !config.providers.openai?.apiKey) {
@@ -1859,9 +2145,16 @@ const server = http.createServer(async (req, res) => {
       // A retry is a new attempt by the job's owner: it pays again, since a failed film was refunded.
       const user = getAuthenticatedUser(req);
       if (!user) return sendError(req, res, 401, 'Please sign in to retry.', 'UNAUTHORIZED');
-      if (!job || (job.userId && job.userId !== user.id)) {
+      if (!job || !canSeeJob(user, job)) {
         return sendError(req, res, 404, `Job "${promptId}" not found`, 'JOB_NOT_FOUND');
       }
+      // Only a failed film is retried: one that is running or done would run again without paying.
+      if (job.status !== 'failed') return sendError(req, res, 409, 'Only a failed film can be retried.', 'NOT_RETRYABLE');
+      if ((job.retries ?? 0) >= MAX_RETRIES && !isAdmin(user)) {
+        return sendError(req, res, 429, `This film was retried ${MAX_RETRIES} times. Start a new one.`, 'TOO_MANY_RETRIES');
+      }
+      const limited = filmLimit(user);
+      if (limited) return sendError(req, res, limited.status, limited.message, limited.code);
       if (!job.credits || job.creditsRefunded) {
         const blocked = paywall(user, job.durationS || 15);
         if (blocked) return sendJson(req, res, 402, { success: false, error: blocked.code, ...blocked });
@@ -1879,6 +2172,7 @@ const server = http.createServer(async (req, res) => {
         : 'Restarting harness job from prompt...';
       job.error = null;
       job.canRetry = false;
+      job.retries = (job.retries ?? 0) + 1;
       job.updatedAt = new Date().toISOString();
       pushLog(job, `Retry requested (${canResumeOnDisk ? 'resuming' : 'restarting'})`);
       persistJobRecord(job);
@@ -2191,18 +2485,27 @@ const server = http.createServer(async (req, res) => {
     // =========================================================================
     // 7. CONVERSATIONS, BRAND KIT, ASSETS, BILLING & MOTION GLYPHS
     // =========================================================================
+    // Each account sees and adds only its own conversations.
     if (pathname === '/api/conversations' && method === 'GET') {
+      const user = getAuthenticatedUser(req);
+      if (!user) return sendError(req, res, 401, 'Please sign in to see your conversations.', 'UNAUTHORIZED');
       return sendJson(req, res, 200, {
         success: true,
-        conversations: db.conversations || [],
+        conversations: (db.conversations || []).filter((c) => c.userId === user.id),
       });
     }
 
     if (pathname === '/api/conversations' && method === 'POST') {
+      const user = getAuthenticatedUser(req);
+      if (!user) return sendError(req, res, 401, 'Please sign in to start a conversation.', 'UNAUTHORIZED');
+      if ((db.conversations || []).filter((c) => c.userId === user.id).length >= 500) {
+        return sendError(req, res, 429, 'You have 500 conversations. Delete some to start another.', 'TOO_MANY_CONVERSATIONS');
+      }
       const body = await readBody(req);
       const conv = {
         id: `c-${crypto.randomUUID()}`,
-        title: String(body.title || 'New video').trim(),
+        userId: user.id,
+        title: String(body.title || 'New video').trim().slice(0, 120),
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         messages: [],

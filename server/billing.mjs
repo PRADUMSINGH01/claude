@@ -18,7 +18,9 @@ const MONTH_MS = 30 * 24 * 3600 * 1000;
 export const creditCost = (seconds) => Math.max(2, Math.ceil(Number(seconds || 15) / 3));
 
 const env = (name) => (process.env[name] ?? '').trim();
-export const billingConfigured = () => Boolean(env('DODO_PAYMENTS_API_KEY'));
+// Dodo documents DODO_PAYMENTS_API_KEY; DODO_API_KEY is accepted too.
+const apiKey = () => env('DODO_PAYMENTS_API_KEY') || env('DODO_API_KEY');
+export const billingConfigured = () => Boolean(apiKey());
 const apiBase = () => env('DODO_PAYMENTS_BASE_URL') || (env('DODO_PAYMENTS_ENVIRONMENT') === 'live_mode' ? 'https://live.dodopayments.com' : 'https://test.dodopayments.com');
 
 // Dodo products, one per tier and interval: DODO_PRODUCT_CREATOR_MONTHLY, DODO_PRODUCT_PRO_ANNUAL, ...
@@ -103,7 +105,7 @@ export class BillingError extends Error {
 async function dodo(method, pathname, body) {
   const res = await fetch(`${apiBase()}${pathname}`, {
     method,
-    headers: { Authorization: `Bearer ${env('DODO_PAYMENTS_API_KEY')}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${apiKey()}`, 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(20_000),
   });

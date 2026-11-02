@@ -27,8 +27,8 @@ export async function catalogSearch(ws, { query, type, tag, limit = 12 }) {
   if (!results.length) {
     const words = [...new Set(String(query).toLowerCase().split(/[^a-z0-9-]+/).filter((w) => w.length > 3 && !STOP.has(w)))].slice(0, 6);
     const score = new Map();
-    for (const w of words) {
-      const r = await catalogQuery(ws, w, type, tag);
+    const perWord = await Promise.all(words.map((w) => catalogQuery(ws, w, type, tag)));
+    for (const r of perWord) {
       for (const [i, item] of (r.results ?? []).slice(0, 15).entries()) {
         const s = score.get(item.name) ?? { item, n: 0, rank: 0 };
         s.n += 1;
@@ -102,10 +102,33 @@ async function scratchManifest(ws, name) {
   return { type: res.json.type, duration: Number(/data-duration="([\d.]+)"/.exec(src)?.[1] ?? 0) || null, variables };
 }
 
-export async function inspectItem(ws, name) {
-  const cachePath = ws.meta('inspect-cache.json');
-  const cache = fs.existsSync(cachePath) ? JSON.parse(fs.readFileSync(cachePath, 'utf8')) : {};
-  if (cache[name]) return cache[name];
+// What an item exposes rarely changes, and the shortlist asks about dozens of them per film. Answers are
+// kept in memory (concurrent asks share one fetch) and on disk across jobs for a week, since the registry
+// itself can change.
+const inspected = new Map();
+const WEEK = 7 * 24 * 3600 * 1000;
+const inspectCacheFile = () => path.join(config.jobsDir, '.cache', 'registry-inspect.json');
+function readInspectCache() {
+  try {
+    return JSON.parse(fs.readFileSync(inspectCacheFile(), 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+export function inspectItem(ws, name) {
+  if (!inspected.has(name)) {
+    inspected.set(name, inspectFresh(ws, name).then((info) => {
+      if (!info.ok) inspected.delete(name); // a failed fetch is retried next time
+      return info;
+    }));
+  }
+  return inspected.get(name);
+}
+
+async function inspectFresh(ws, name) {
+  const disk = readInspectCache()[name];
+  if (disk?.info && Date.now() - disk.at < WEEK) return disk.info;
   const m = (await fetchManifest(name)) ?? (await scratchManifest(ws, name));
   if (m.error) return { name, ok: false, error: m.error };
   const vars = m.variables ?? [];
@@ -122,10 +145,19 @@ export async function inspectItem(ws, name) {
     controls: vars.filter((v) => !['string', 'image', 'video', 'color'].includes(v.type)).map((v) => ({ id: v.id, type: v.type, default: v.default, options: v.options ?? v.enum ?? null })),
     // Fonts the item ships: it animates with these, so a theme font may not apply to it.
     fonts: [...new Set((m.files ?? []).map((f) => f.path ?? f).filter((p) => /\.(woff2?|ttf|otf)$/i.test(p)).map((p) => p.split('/').pop().replace(/[-_](wght|slnt|latin|regular|variable|vf).*$/i, '').replace(/\.(woff2?|ttf|otf)$/i, '')))],
+    // Pictures and footage the item ships: shown as its demo material whatever variables it has.
+    media: (m.files ?? []).map((f) => f.path ?? f).filter((p) => /\.(png|jpe?g|webp|avif|gif|mp4|webm|mov)$/i.test(p)),
     description: m.description ?? '',
   };
-  cache[name] = info;
-  fs.writeFileSync(cachePath, JSON.stringify(cache, null, 2));
+  try { // write whole, then rename: parallel shortlist lookups must never leave a half-written file
+    const file = inspectCacheFile();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const all = { ...readInspectCache(), [name]: { at: Date.now(), info } };
+    fs.writeFileSync(`${file}.${process.pid}.tmp`, JSON.stringify(all));
+    fs.renameSync(`${file}.${process.pid}.tmp`, file);
+  } catch {
+    /* only a cache */
+  }
   return info;
 }
 

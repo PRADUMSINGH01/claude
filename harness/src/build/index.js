@@ -17,11 +17,19 @@ import { assemble, indexHtml } from './assemble.js';
 import { findingsFor, sceneFile, staticProblems, writeFallback, writeScene } from './scenes.js';
 
 const MAX_REPAIRS = 2;
-const PARALLEL = 3;
+// Scene writes are network-bound: run several at once (BUILD_PARALLEL), as a pool so one slow scene never
+// holds back the rest.
+const PARALLEL = Math.max(1, Number(process.env.BUILD_PARALLEL) || 6);
 
-async function inBatches(list, n, fn) {
-  const out = [];
-  for (let i = 0; i < list.length; i += n) out.push(...(await Promise.all(list.slice(i, i + n).map(fn))));
+async function pool(list, n, fn) {
+  const out = new Array(list.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(n, list.length) }, async () => {
+    while (next < list.length) {
+      const i = next++;
+      out[i] = await fn(list[i], i);
+    }
+  }));
   return out;
 }
 
@@ -84,12 +92,19 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
 
   const fontCss = fs.readFileSync(path.join(ws.projectDir, 'index.html'), 'utf8').match(/@font-face[^}]*}/g)?.join('\n') ?? '';
   const themeColors = JSON.parse(fs.readFileSync(path.join(ws.projectDir, 'theme.json'), 'utf8')).colors ?? {};
+  // The full check (every sample and the contrast pass) is slow and runs once, when the film is verified.
+  // Repair loops only need contract errors in the scenes they touched: sample just those scenes' time span
+  // and skip contrast (measured about 3x faster). Static lint still covers the whole project.
+  const quickCheck = (list) => {
+    const range = list.length ? `${Math.min(...list.map((s) => s.start))},${Math.max(...list.map((s) => s.start + s.duration))}` : null;
+    return runCheck(ws, ['--no-contrast', ...(range ? ['--range', range] : [])]);
+  };
   const rewriteIndex = () => fs.writeFileSync(path.join(ws.projectDir, 'index.html'), indexHtml(plan, scenes, asm.roles, fontCss, themeColors));
 
   // 2–3. Write and verify the scenes the model has to write.
   const writeAndVerify = async (targets) => {
     // First drafts, in parallel; code checks get one immediate fix.
-    await inBatches(targets, PARALLEL, async (s) => {
+    await pool(targets, PARALLEL, async (s) => {
       emit('scene', { id: s.id, step: 'write' });
       let html = await writeScene(s, ctx);
       report.scenes[s.id].attempts++;
@@ -109,20 +124,22 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
       else { writeFallback(ws, s, ctx); report.scenes[s.id].result = 'fallback (contract)'; report.scenes[s.id].why = problems; }
     });
     // Browser checks, findings per file, ≤ MAX_REPAIRS rounds.
+    let check = null;
     for (let round = 1; round <= MAX_REPAIRS; round++) {
-      const check = await runCheck(ws);
+      check = await quickCheck(targets);
       const failing = targets.filter((s) => report.scenes[s.id].result === 'pending' && findingsFor(check, s.file).some((f) => f.startsWith('[error]')));
       emit('check', { round, errors: check.errors, warnings: check.warnings, failing: failing.map((s) => s.id) });
       if (!failing.length) break;
-      await inBatches(failing, PARALLEL, async (s) => {
+      await pool(failing, PARALLEL, async (s) => {
         const problems = findingsFor(check, s.file);
         emit('scene', { id: s.id, step: `repair ${round}`, problems });
         const html = await writeScene(s, ctx, { problems, current: fs.readFileSync(sceneFile(ws, s), 'utf8') });
         report.scenes[s.id].attempts++;
         if (html && !staticProblems(html, s.id, s.duration).length) fs.writeFileSync(sceneFile(ws, s), html);
       });
+      check = null; // the files changed since: check again
     }
-    const check = await runCheck(ws);
+    check ??= await quickCheck(targets);
     for (const s of targets.filter((x) => report.scenes[x.id].result === 'pending')) {
       const errs = findingsFor(check, s.file).filter((f) => f.startsWith('[error]'));
       if (errs.length) { writeFallback(ws, s, ctx); report.scenes[s.id].result = 'fallback (check errors)'; report.scenes[s.id].why = errs; } else report.scenes[s.id].result = 'written';
@@ -148,7 +165,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
   }
   if (scaled.length) {
     rewriteIndex();
-    const after = findingsFor(await runCheck(ws), 'index.html').filter((f) => f.startsWith('[error]'));
+    const after = findingsFor(await quickCheck(scaled), 'index.html').filter((f) => f.startsWith('[error]'));
     if (after.length) { // the runtime refused the transform: keep the film valid
       for (const s of scaled) delete s.scale;
       rewriteIndex();
@@ -170,7 +187,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
   emit('measured', { issues });
 
   const writtenWithIssues = scenes.filter((s) => s.mode === 'write' && !String(report.scenes[s.id].result).startsWith('fallback') && issues.some((i) => i.id === s.id));
-  await inBatches(writtenWithIssues, PARALLEL, async (s) => {
+  await pool(writtenWithIssues, PARALLEL, async (s) => {
     const problems = issues.filter((i) => i.id === s.id).map((i) => i.problem);
     emit('scene', { id: s.id, step: 'film repair', problems });
     const html = await writeScene(s, ctx, { problems, current: fs.readFileSync(sceneFile(ws, s), 'utf8') });
@@ -178,7 +195,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
     if (html && !staticProblems(html, s.id, s.duration).length) fs.writeFileSync(sceneFile(ws, s), html);
   });
   if (writtenWithIssues.length) {
-    const c = await runCheck(ws);
+    const c = await quickCheck(writtenWithIssues);
     for (const s of writtenWithIssues) if (findingsFor(c, s.file).some((f) => f.startsWith('[error]'))) { writeFallback(ws, s, ctx); report.scenes[s.id].result = 'fallback (film repair broke it)'; }
   }
 
@@ -206,14 +223,14 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
     report.look = await lookAtFilm(ws, plan, scenes, looker, usage, maxTokens, emit);
     const toFix = (report.look?.issues ?? []).map((i) => ({ i, s: scenes.find((x) => x.id === i.scene && x.mode === 'write') })).filter((x) => x.s);
     const before = new Map();
-    await inBatches(toFix, PARALLEL, async ({ i, s }) => {
+    await pool(toFix, PARALLEL, async ({ i, s }) => {
       before.set(s.id, fs.readFileSync(sceneFile(ws, s), 'utf8'));
       const html = await writeScene(s, ctx, { problems: [`${i.problem} → ${i.fix}`], current: before.get(s.id) });
       report.scenes[s.id].attempts++;
       if (html && !staticProblems(html, s.id, s.duration).length) fs.writeFileSync(sceneFile(ws, s), html);
     });
     if (toFix.length) {
-      const c = await runCheck(ws);
+      const c = await quickCheck(toFix.map(({ s }) => s));
       const blank = await measure(ws, plan, toFix.map(({ s }) => s));
       for (const { s } of toFix) {
         const broke = findingsFor(c, s.file).some((f) => f.startsWith('[error]')) || blank.some((b) => b.id === s.id && b.kind !== 'small');
@@ -248,20 +265,8 @@ async function measure(ws, plan, scenes) {
   const layers = await layerEvidence(ws, plan);
   for (const i of layers.issues) issues.push({ id: /scene (\S+)/.exec(i.where)?.[1], problem: i.evidence });
   const covers = scenes.filter((s) => s.layer === 'transition');
-  if (covers.length) {
-    const mids = covers.map((s) => +(s.start + s.duration / 2).toFixed(2));
-    const r = await hfJson(ws, ['snapshot', '--at', mids.join(','), '--no-end'], { timeoutSec: config.commandTimeoutSec });
-    const byTime = new Map((r.json?.frames ?? []).map((f) => [Number(f.time), f.path]));
-    for (const [i, s] of covers.entries()) {
-      const file = byTime.get(mids[i]);
-      if (!file) continue;
-      // Covered = the beat's own ground no longer shows. Sample 5 patches (corners + centre) against it.
-      const ground = await groundPatches(ws, file, plan.__ground);
-      if (ground >= 3) issues.push({ id: s.id, problem: `at its midpoint (t=${mids[i]}s) the transition does not cover the frame: the ground colour still shows in ${ground} of 5 sampled patches, so the cut is visible` });
-    }
-  }
+  const mids = covers.map((s) => +(s.start + s.duration / 2).toFixed(2));
   const targets = scenes.filter((s) => !['background', 'transition'].includes(s.layer) && (s.text ?? []).some((t) => String(t).trim()));
-  if (!targets.length) return issues;
   // A scene's last moment must still show its copy (an exit may only start in its last 0.3 s), whoever
   // built it: a written scene or a mounted item that ends early leaves dead air before the cut or the end
   // of the film. Not where a cover transition hides the cut, nor where the plan asks to end on an empty frame.
@@ -272,30 +277,43 @@ async function measure(ws, plan, scenes) {
   const hasBackground = scenes.some((s) => s.layer === 'background');
   // Sample late in each scene, after entrances, before any exit.
   const at = targets.map((s) => +(s.start + s.duration * 0.6).toFixed(2));
-  const res = await hfJson(ws, ['snapshot', '--at', [...new Set([...at, ...tails.map(tailAt)])].join(','), '--no-end'], { timeoutSec: config.commandTimeoutSec });
+  // One snapshot for every frame below: each snapshot call starts a browser (~20 s), so never two.
+  const times = [...new Set([...mids, ...at, ...tails.map(tailAt)])];
+  if (!times.length) return issues;
+  const res = await hfJson(ws, ['snapshot', '--at', times.join(','), '--no-end'], { timeoutSec: config.commandTimeoutSec });
   const byTime = new Map((res.json?.frames ?? []).map((f) => [Number(f.time), f.path]));
   const pct = (x) => `${Math.round(x * 100)}%`;
-  for (const [i, s] of targets.entries()) {
-    const file = byTime.get(at[i]);
-    if (!file) continue;
-    const spread = await lumaSpread(ws, file, s);
-    if (spread != null && spread < 4) {
-      issues.push({ id: s.id, problem: `at t=${at[i]}s the ${s.layer === 'overlay' ? 'overlay band' : 'frame'} is blank (luma spread ${spread}); its copy should be visible` });
-      continue;
-    }
-    // The hero fills at least 40% of the frame's width or height (the scene writer's own rule), measured so
-    // ready-made blocks are held to it too. Not over a background layer, whose texture hides the copy's box.
-    if (s.layer !== 'main' || hasBackground) continue;
-    const ink = await inkBox(ws, file);
-    if (ink && Math.max(ink.w, ink.h) < 0.4) {
-      issues.push({ id: s.id, kind: 'small', ink, problem: `at t=${at[i]}s the copy spans only ${pct(ink.w)} of the frame's width and ${pct(ink.h)} of its height; the hero must fill at least 40% of the width or the height` });
-    }
-  }
-  for (const s of tails) {
-    const file = byTime.get(tailAt(s));
-    const spread = file ? await lumaSpread(ws, file, s) : null;
-    if (spread != null && spread < 4) issues.push({ id: s.id, problem: `the frame is blank at t=${tailAt(s)}s, just before the scene ends at ${+(s.start + s.duration).toFixed(2)}s: the copy leaves too early. Keep it on screen until the scene's last 0.3 s` });
-  }
+  // The frames are measured in parallel: each measurement is its own short ffmpeg run.
+  await Promise.all([
+    ...covers.map(async (s, i) => {
+      const file = byTime.get(mids[i]);
+      if (!file) return;
+      // Covered = the beat's own ground no longer shows. Sample 5 patches (corners + centre) against it.
+      const ground = await groundPatches(ws, file, plan.__ground);
+      if (ground >= 3) issues.push({ id: s.id, problem: `at its midpoint (t=${mids[i]}s) the transition does not cover the frame: the ground colour still shows in ${ground} of 5 sampled patches, so the cut is visible` });
+    }),
+    ...targets.map(async (s, i) => {
+      const file = byTime.get(at[i]);
+      if (!file) return;
+      const spread = await lumaSpread(ws, file, s);
+      if (spread != null && spread < 4) {
+        issues.push({ id: s.id, problem: `at t=${at[i]}s the ${s.layer === 'overlay' ? 'overlay band' : 'frame'} is blank (luma spread ${spread}); its copy should be visible` });
+        return;
+      }
+      // The hero fills at least 40% of the frame's width or height (the scene writer's own rule), measured so
+      // ready-made blocks are held to it too. Not over a background layer, whose texture hides the copy's box.
+      if (s.layer !== 'main' || hasBackground) return;
+      const ink = await inkBox(ws, file);
+      if (ink && Math.max(ink.w, ink.h) < 0.4) {
+        issues.push({ id: s.id, kind: 'small', ink, problem: `at t=${at[i]}s the copy spans only ${pct(ink.w)} of the frame's width and ${pct(ink.h)} of its height; the hero must fill at least 40% of the width or the height` });
+      }
+    }),
+    ...tails.map(async (s) => {
+      const file = byTime.get(tailAt(s));
+      const spread = file ? await lumaSpread(ws, file, s) : null;
+      if (spread != null && spread < 4) issues.push({ id: s.id, problem: `the frame is blank at t=${tailAt(s)}s, just before the scene ends at ${+(s.start + s.duration).toFixed(2)}s: the copy leaves too early. Keep it on screen until the scene's last 0.3 s` });
+    }),
+  ]);
   return issues;
 }
 

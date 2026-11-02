@@ -277,7 +277,7 @@ async function shortlistFor(ws, query, { needsText, type, prompt, background = f
     if (background && !BACKGROUND_KIND.test(`${item.name} ${item.tags.join(' ')} ${item.description}`)) continue;
     const info = await inspectItem(ws, item.name);
     if (!info.ok) continue;
-    if (info.imageVars.length) continue; // would show demo photos
+    if (info.imageVars.length || info.media?.length) continue; // would show demo photos or footage
     if (needsText && !info.textVars.length) continue; // copy is hard-coded
     out.push({ name: item.name, type: item.type, description: item.description, tags: item.tags, ...info });
     if (out.length >= max) break;
@@ -285,28 +285,36 @@ async function shortlistFor(ws, query, { needsText, type, prompt, background = f
   return out;
 }
 
+// Every search is independent, so they all run at once (each is a CLI call, ~2.5 s). Keys are set up front so
+// the lists keep the brief's order, which the plan prompt shows.
 export async function shortlist(ws, brief, prompt) {
   const lists = {};
   const components = {};
+  const searches = [];
+  const put = (into, key, search) => {
+    into[key] = [];
+    searches.push(search.then((items) => { into[key] = items; }));
+  };
   for (const b of brief.beats) {
     const query = b.intent || b.copy.join(' ');
     const hasCopy = b.copy.some((c) => c.trim());
-    lists[b.id] = await shortlistFor(ws, query, { needsText: hasCopy, type: 'block', prompt });
+    put(lists, b.id, shortlistFor(ws, query, { needsText: hasCopy, type: 'block', prompt }));
     // Components (text effects, captions, props) merge into a hand-built scene and take the scene's own copy.
-    if (hasCopy) components[b.id] = await shortlistFor(ws, query, { needsText: false, type: 'component', prompt, max: 3 });
+    if (hasCopy) put(components, b.id, shortlistFor(ws, query, { needsText: false, type: 'component', prompt, max: 3 }));
   }
   for (const o of brief.overlays ?? []) {
     const query = o.intent || `${o.position ?? ''} text overlay`;
-    lists[o.id] = await shortlistFor(ws, query, { needsText: true, type: 'block', prompt, max: 3 });
-    components[o.id] = await shortlistFor(ws, query, { needsText: false, type: 'component', prompt, max: 3 });
+    put(lists, o.id, shortlistFor(ws, query, { needsText: true, type: 'block', prompt, max: 3 }));
+    put(components, o.id, shortlistFor(ws, query, { needsText: false, type: 'component', prompt, max: 3 }));
   }
   for (const tr of (brief.transitions ?? []).filter((x) => x.kind === 'cover')) {
-    const found = await shortlistFor(ws, `${tr.style} transition`, { needsText: false, type: 'block', prompt, max: 6 });
-    lists[tr.id] = found.filter((i) => /overlay transition|covers? the frame|backstop/i.test(i.description) && !/showcase|shader transition/i.test(i.description)).slice(0, 3);
+    put(lists, tr.id, shortlistFor(ws, `${tr.style} transition`, { needsText: false, type: 'block', prompt, max: 6 })
+      .then((found) => found.filter((i) => /overlay transition|covers? the frame|backstop/i.test(i.description) && !/showcase|shader transition/i.test(i.description)).slice(0, 3)));
   }
   if (brief.background?.wanted) {
-    lists.background = await shortlistFor(ws, `${brief.background.description || ''} background`.trim(), { needsText: false, type: 'block', prompt, background: true });
+    put(lists, 'background', shortlistFor(ws, `${brief.background.description || ''} background`.trim(), { needsText: false, type: 'block', prompt, background: true }));
   }
+  await Promise.all(searches);
   return { blocks: lists, components };
 }
 

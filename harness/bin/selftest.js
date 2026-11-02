@@ -576,7 +576,8 @@ if (!quick) {
     assert.ok(carousel.ok && carousel.imageVars.length >= 6, JSON.stringify(carousel));
     const title = await inspectItem(ws, 'canopy-part-title');
     assert.ok(title.textVars.includes('headline1'), JSON.stringify(title));
-    assert.ok(fs.existsSync(ws.meta('inspect-cache.json')));
+    assert.ok(JSON.parse(fs.readFileSync(path.join(config.jobsDir, '.cache', 'registry-inspect.json'), 'utf8'))['canopy-part-title'], 'cached across jobs');
+    assert.ok(title.media.length > 0, 'canopy-part-title ships leaf pictures: the shortlist must skip it');
   });
 
   await step('check and snapshot produce agent-sized summaries', async () => {

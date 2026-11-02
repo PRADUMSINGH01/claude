@@ -331,7 +331,8 @@ export function makeReviewTools() {
       parameters: { type: 'object', properties: { composition: { type: 'string', description: 'Optional data-composition-id to scope to' } }, additionalProperties: false },
       run: async (args, ctx) => {
         ctx.emit('check_run', { composition: args.composition ?? null });
-        const s = await runCheck(ctx.ws, args.composition ? ['--composition', args.composition] : []);
+        // check has no --composition flag: --components filters findings to that composition's host.
+        const s = await runCheck(ctx.ws, args.composition ? ['--components', `[data-composition-id="${args.composition}"]`] : []);
         return withGuidance(ctx, s);
       },
     },

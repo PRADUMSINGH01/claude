@@ -540,11 +540,13 @@ ${JSON.stringify(rows, null, 1)}`, usage, { ...opts, label: 'judge' });
 // log (optional) receives every call, cut-off retries included, for the job's calls/ archive.
 export async function ask(provider, system, user, usage, { signal, parse = parseModelJson, label = 'ask', log } = {}) {
   const messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
+  const json = parse === parseModelJson;
   let max = config.maxOutputTokens;
+  let reparsed = false;
   for (let attempt = 0; ; attempt++) {
     signal?.throwIfAborted();
     const started = Date.now();
-    const { message, finish, usage: u } = await chat(provider, messages, null, { maxOutputTokens: max, signal });
+    const { message, finish, usage: u } = await chat(provider, messages, null, { maxOutputTokens: max, signal, json });
     usage.input += u.input;
     usage.output += u.output;
     usage.calls += 1;
@@ -557,7 +559,15 @@ export async function ask(provider, system, user, usage, { signal, parse = parse
       continue;
     }
     usage.lastRaw = raw;
-    return parse(raw);
+    const value = parse(raw);
+    // A complete reply that is not valid JSON (one stray quote) is asked for again once, fresh: the whole step,
+    // often the whole job, would otherwise be lost to it.
+    if (value == null && json && finish !== 'length' && !reparsed) {
+      reparsed = true;
+      console.error(`[plan] ${provider.name} reply for ${label} was not valid JSON; asking once more`);
+      continue;
+    }
+    return value;
   }
 }
 

@@ -419,7 +419,7 @@ async function lookAtFilm(ws, plan, scenes, provider, usage, maxTokens, emit) {
   const img = await imageMessage(provider, 'Contact sheet, frames in scene order:', [sheet]);
   const planText = JSON.stringify(shown.map((s) => ({ scene: s.id, at: lookTime(s), copy: s.text, build: s.build })), null, 1);
   const started = Date.now();
-  const { message, finish, usage: u } = await chat(provider, [{ role: 'system', content: LOOK_SYSTEM }, { role: 'user', content: planText }, img].filter(Boolean), null);
+  const { message, finish, usage: u } = await chat(provider, [{ role: 'system', content: LOOK_SYSTEM }, { role: 'user', content: planText }, img].filter(Boolean), null, { json: true });
   usage.input += u.input;
   usage.output += u.output;
   usage.calls += 1;

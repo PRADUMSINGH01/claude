@@ -508,6 +508,29 @@ await step('GLM: low effort turns thinking off, medium and up turn it on', async
   assert.equal(glm(''), undefined, 'no effort: the provider default');
 });
 
+await step('JSON replies: JSON mode on OpenAI/Azure, and one fresh ask when a reply is not valid JSON', async () => {
+  const { requestBody } = await import('../src/llm.js');
+  const { ask } = await import('../src/plan.js');
+  assert.deepEqual(requestBody({ kind: 'azure', model: 'm' }, [], null, undefined, 100, true).response_format, { type: 'json_object' });
+  assert.equal(requestBody({ kind: 'glm', model: 'm' }, [], null, undefined, 100, true).response_format, undefined);
+  // What GPT-5 mini sent once: "description": "": "" — the job used to fail on it.
+  const replies = ['{"background": {"description": "": ""}, "beats": []}', '{"beats": [{"id": "a"}]}'];
+  let n = 0;
+  const server = http.createServer((req, res) => {
+    req.resume().on('end', () => {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ id: 'x', object: 'chat.completion', created: 0, model: 'fake', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: replies[n++] } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }));
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const fake = { name: 'fake', kind: 'openai', apiKey: 'x', baseURL: `http://127.0.0.1:${server.address().port}/v1/`, model: 'fake', effort: '' };
+  const usage = { input: 0, output: 0, calls: 0 };
+  const out = await ask(fake, 'Reply with JSON only', 'brief', usage, { label: 'understand' });
+  server.close();
+  assert.deepEqual(out, { beats: [{ id: 'a' }] });
+  assert.equal(usage.calls, 2);
+});
+
 await step('ids a model leaves out are filled in code, never "undefined"', async () => {
   const { fillIds } = await import('../src/plan.js');
   // What GLM's story step returned: transitions with no id.

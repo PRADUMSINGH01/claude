@@ -32,8 +32,10 @@ function client(p) {
   return clients.get(key);
 }
 
-export function requestBody(p, messages, tools, toolChoice, maxOut = config.maxOutputTokens) {
+export function requestBody(p, messages, tools, toolChoice, maxOut = config.maxOutputTokens, json = false) {
   const body = { model: p.model, messages };
+  // OpenAI and Azure can guarantee a valid JSON object; a malformed reply otherwise costs a repair call or the job.
+  if (json && (p.kind === 'openai' || p.kind === 'azure')) body.response_format = { type: 'json_object' };
   if (tools?.length) {
     body.tools = p.kind === 'gemini' ? tools.map((t) => ({ ...t, function: { ...t.function, parameters: geminiSchema(t.function.parameters) } })) : tools;
     body.tool_choice = toolChoice ?? 'auto';
@@ -74,8 +76,8 @@ export function geminiSchema(s) {
 
 const RETRY = new Set([408, 409, 429, 500, 502, 503, 504, 529]);
 
-export async function chat(provider, messages, tools, { signal, toolChoice, maxOutputTokens } = {}) {
-  const body = requestBody(provider, messages, tools, toolChoice, maxOutputTokens);
+export async function chat(provider, messages, tools, { signal, toolChoice, maxOutputTokens, json } = {}) {
+  const body = requestBody(provider, messages, tools, toolChoice, maxOutputTokens, json);
   for (let attempt = 0; ; attempt++) {
     const started = Date.now();
     try {

@@ -61,15 +61,24 @@ export async function prepareFonts(ws, names) {
     }
     const dir = path.join(ws.projectDir, 'assets', 'fonts');
     fs.mkdirSync(dir, { recursive: true });
+    const got = [];
     for (const f of faces) {
       const file = `${family.replace(/[^a-z0-9]+/gi, '-')}-${f.weight}.woff2`;
-      const res = await fetch(f.url, { signal: AbortSignal.timeout(20_000) });
-      const buf = Buffer.from(await res.arrayBuffer());
-      if (!res.ok || buf.subarray(0, 4).toString('latin1') !== 'wOF2') continue; // only real woff2
+      // A face that fails to download is left out: a network blip here once failed a whole job.
+      const buf = await fetch(f.url, { signal: AbortSignal.timeout(20_000) })
+        .then(async (res) => (res.ok ? Buffer.from(await res.arrayBuffer()) : null))
+        .catch(() => null);
+      if (buf?.subarray(0, 4).toString('latin1') !== 'wOF2') continue; // only real woff2
       fs.writeFileSync(path.join(dir, file), buf);
       css.push(`@font-face { font-family: "${family}"; src: url("assets/fonts/${file}") format("woff2"); font-weight: ${f.weight}; font-style: normal; font-display: block; }`);
+      got.push(f.weight);
     }
-    report.push({ family, how: `downloaded from Google Fonts (${faces.map((f) => f.weight).join(', ')})` });
+    if (!got.length) {
+      map[name] = 'Inter';
+      report.push({ family, how: 'download failed: using Inter instead' });
+      continue;
+    }
+    report.push({ family, how: `downloaded from Google Fonts (${got.join(', ')})` });
   }
   return { css: css.join('\n'), report, map };
 }

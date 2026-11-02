@@ -85,6 +85,19 @@ async function fetchManifest(name) {
   return null;
 }
 
+// Whether the registry has an item by exactly this name: its manifest is there. A ranked catalog search is the
+// fallback only when the registry can't be reached (a real run lost a named item to a busy catalog CLI).
+export async function registryHas(ws, name) {
+  const safe = String(name).replace(/[^a-z0-9-]/gi, '');
+  try {
+    const found = await Promise.all(['blocks', 'components'].map((dir) =>
+      fetch(`${config.registryRawUrl}/${dir}/${safe}/registry-item.json`, { method: 'HEAD', signal: AbortSignal.timeout(10_000) }).then((r) => r.ok)));
+    return found.some(Boolean);
+  } catch {
+    return (await catalogSearch(ws, { query: name, limit: 5 })).items.some((i) => i.name === name);
+  }
+}
+
 // Fallback: install into a scratch project (not the film's) and read the HTML.
 async function scratchManifest(ws, name) {
   const scratch = path.join(ws.homeDir, 'inspect');

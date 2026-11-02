@@ -113,7 +113,7 @@ export async function assemble(ws, plan, brief, { emit = () => {} } = {}) {
 
   // Install every registry item once.
   const items = {};
-  const names = [...new Set(plan.scenes.flatMap((s) => [s.block, ...(s.components ?? [])]).filter(Boolean))];
+  const names = [...new Set(plan.scenes.flatMap((s) => [s.block, ...(s.components ?? []), ...(s.adapt ?? [])]).filter(Boolean))];
   for (const name of names) {
     const add = await registryAdd(ws, name);
     if (!add.ok) { warnings.push(`install ${name} failed: ${add.text.slice(0, 200)}`); continue; }
@@ -133,8 +133,10 @@ export async function assemble(ws, plan, brief, { emit = () => {} } = {}) {
     const copy = (s.text ?? []).filter((x) => String(x).trim());
     if (s.block && !items[s.block]) warnings.push(`${s.id}: block ${s.block} is not installed; the scene will be written instead`);
     let mode = 'write';
-    // A scene with stock media is always written: its file goes under the copy, which no mounted item can do.
-    let item = s.block && items[s.block] && !s.media ? items[s.block] : !s.block && !s.media && comps.length === 1 && comps[0].mountable ? comps[0] : null;
+    // A scene with stock media, or one that adapts an item's source, is always written: no mounted item can put
+    // a file under its copy or carry copy its code hard-wires.
+    const written = Boolean(s.media || s.adapt?.length);
+    let item = s.block && items[s.block] && !written ? items[s.block] : !s.block && !written && comps.length === 1 && comps[0].mountable ? comps[0] : null;
     let values = {};
     let leftover = [];
 

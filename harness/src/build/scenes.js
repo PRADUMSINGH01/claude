@@ -46,7 +46,7 @@ The file must follow the contract below exactly:
 - Colours and fonts only through the theme tokens: var(--bg) var(--fg) var(--accent) var(--accent-2) var(--font-display) var(--font-body). Never make text the ground colour.
 - On-screen text: exactly the scene's copy, verbatim, written as text in the HTML. No other words: remove a component's demo labels, counters and percentages.
 - Words split into separate elements keep their spaces: put them in a block or inline container, never a flex or grid row without a gap (flex drops the spaces, so "Roasted on" reads "Roastedon").
-- Components: when one is listed, adapt its markup, CSS and script into this file as its comment says (set its text and options in code from the scene's values). Don't load external files.
+- Components and adapted blocks: each <component> below is source to adapt, not to mount. Keep its technique (the typing, the shatter, the reveal) and rewrite its markup, CSS and script into this file's skeleton with the scene's copy, timing and theme tokens; none of its demo text survives. Don't load external files.
 
 How it looks and moves (the design rules below, in numbers):
 - The scene's own build and motion win where they are specific; the rules below fill every gap.
@@ -75,7 +75,7 @@ export function scenePacket(scene, ctx) {
   const { format, roles, lib, items } = ctx;
   const [bw, bh] = BOX_SIZE[scene.layer === 'overlay' ? scene.position ?? 'bottom' : 'full'];
   const box = { width: Math.round(format.width * bw), height: Math.round(format.height * bh) };
-  const comps = [...(scene.components ?? []), ...(scene.escalatedFrom ? [scene.escalatedFrom] : [])].map((n) => items[n]).filter(Boolean);
+  const comps = [...new Set([...(scene.components ?? []), ...(scene.adapt ?? []), ...(scene.escalatedFrom ? [scene.escalatedFrom] : [])])].map((n) => items[n]).filter(Boolean);
   const rules = [
     `- Root: <div id="root" data-composition-id="${scene.id}">; register window.__timelines["${scene.id}"] = tl; ids prefixed "${scene.id}-"; every clip inside 0-${scene.duration}s.`,
     `- The box is ${box.width}x${box.height}px.`,
@@ -160,10 +160,15 @@ export async function writeScene(scene, ctx, { problems = null, current = null }
   return ctx.ask(system, user + repair, { label: `${problems ? 'repair' : 'write'} ${scene.id}`, parse: extractHtml });
 }
 
+// One line per distinct finding with its count: the check reports each element, and a real run's repair prompt
+// carried the same text_occluded line thirty-one times.
 export function findingsFor(check, file) {
   const norm = (p) => String(p ?? '').replace(/\\/g, '/');
-  return (check.findings ?? []).filter((f) => f.severity !== 'info' && norm(f.sourceFile).endsWith(file))
+  const lines = (check.findings ?? []).filter((f) => f.severity !== 'info' && norm(f.sourceFile).endsWith(file))
     .map((f) => `[${f.severity}] ${f.code}: ${f.message}${f.fixHint ? ` (fix: ${f.fixHint})` : ''}`);
+  const counts = new Map();
+  for (const l of lines) counts.set(l, (counts.get(l) ?? 0) + 1);
+  return [...counts].map(([l, n]) => (n > 1 ? `${l} (${n} elements)` : l));
 }
 
 export const sceneFile = (ws, scene) => path.join(ws.projectDir, scene.file);

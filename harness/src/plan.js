@@ -5,7 +5,7 @@ import { config, providerForRole } from './config.js';
 import { chat } from './llm.js';
 import { SkillLibrary } from './skills/library.js';
 import { requireSection } from './tools/skill-tools.js';
-import { catalogSearch, inspectItem, listThemes } from './tools/registry-tools.js';
+import { catalogSearch, inspectItem, listThemes, registryHas } from './tools/registry-tools.js';
 import { opaqueOverBackground, plannerHandoff } from './roles/planner.js';
 import { Workspace } from './workspace.js';
 import { stockEnabled } from './media/stock.js';
@@ -324,7 +324,20 @@ export async function shortlist(ws, brief, prompt) {
     put(lists, 'background', shortlistFor(ws, `${brief.background.description || ''} background`.trim(), { needsText: false, type: 'block', prompt, background: true }));
   }
   await Promise.all(searches);
-  return { blocks: lists, components };
+  return { blocks: lists, components, requested: await requestedItems(ws, prompt) };
+}
+
+// Registry items the request names ("adapt the code-typing and vfx-shatter blocks"): looked up by exact name
+// and offered to every scene whatever the shortlist filters say, since the person asked for them.
+export const namedCandidates = (prompt) => [...new Set(String(prompt).toLowerCase().match(/\b[a-z0-9]+(?:-[a-z0-9]+)+\b/g) ?? [])].slice(0, 8);
+
+async function requestedItems(ws, prompt) {
+  const found = await Promise.all(namedCandidates(prompt).map(async (name) => {
+    if (!(await registryHas(ws, name))) return null;
+    const info = await inspectItem(ws, name);
+    return info.ok ? { ...info, type: info.kind, tags: [] } : null;
+  }));
+  return found.filter(Boolean);
 }
 
 // ---- 3. Plan -----------------------------------------------------------------
@@ -336,7 +349,7 @@ const PLAN_SHAPE = `{
   "scenes": [ {
     "id": "kebab-id", "layer": "main | background | overlay | transition", "start": 0, "duration": 5,
     "purpose": "what the viewer takes from it", "text": ["exact copy"],
-    "block": "<registry name from the shortlist, or null to hand-build>", "components": [],
+    "block": "<registry name from the shortlist, or null to hand-build>", "components": [], "adapt": [],
     "vars": { "<variable id of the block or its components>": "<value>" },
     "build": "layout and objects in numbers (px, %, hex)", "motion": "the one hero move, eases, hand-off", "sound": "",
     "media": null OR { "kind": "video | photo", "query": "what is in frame, 3-8 concrete words" }
@@ -358,7 +371,9 @@ Rules:
 - vars holds only variable ids that the chosen block or components list. A hand-built scene with no components has empty vars: its layout, sizes and fonts go in build.
 - For each scene pick a block from that beat's shortlist BY ITS DESCRIPTION: what it shows must match the beat's intent AND the brief's look.mood (no 3D spectacle for a calm editorial piece, no diagram plates for a wordmark, no chat UI for a headline). If nothing fits, use null and hand-build.
 - A hand-built scene may use components from that beat's component shortlist (list them in components); the scene supplies the copy.
-- Never name a block or component outside the shortlists.
+- adapt: registry items whose source a hand-built scene starts from (their markup, CSS and script, rewritten for this scene's copy, timing and theme; nothing is mounted). When the request says to adapt or use an item it names, put that item in the adapt of the scene it belongs to, and set that scene's block to null.
+- A scene that continues an object from the scene before (the same terminal breaks apart, the same card flips) repeats that object's text in its own text and its size and position in its build, so the cut between them cannot be seen.
+- Never name a block or component outside the shortlists and the requested items.
 - motion and build describe what the chosen block actually does (from its description) and how you tune it: set its behaviour controls in vars. Do not invent effects the block does not have.
 - If a block animates with its bundled font, keep that font for that scene and say so in decisions; the theme font applies to hand-built scenes.
 - Repeating a block for two beats is fine; vary its controls (e.g. direction) so the beats differ.
@@ -390,8 +405,11 @@ function describeCandidate(i) {
   ].filter(Boolean).join('\n');
 }
 
-function shortlistText({ blocks, components }) {
-  return Object.entries(blocks).map(([beat, items]) => {
+function shortlistText({ blocks, components, requested = [] }) {
+  const named = requested.length
+    ? `requested by name in the request (for any scene; put one in a hand-built scene's adapt to build from its source):\n${requested.map(describeCandidate).join('\n')}\n\n`
+    : '';
+  return named + Object.entries(blocks).map(([beat, items]) => {
     const comps = components[beat] ?? [];
     return [
       `${beat} blocks:`,
@@ -401,7 +419,7 @@ function shortlistText({ blocks, components }) {
   }).join('\n\n');
 }
 
-const allItems = (sl) => [...Object.values(sl.blocks ?? {}), ...Object.values(sl.components ?? {})].flat();
+const allItems = (sl) => [...Object.values(sl.blocks ?? {}), ...Object.values(sl.components ?? {}), ...(sl.requested ?? [])].flat();
 
 // Checks only the shortlist can answer: real variable ids, a background block for the background
 // layer, the brief's preset, readable timing.
@@ -415,12 +433,23 @@ export function planChecks(plan, brief, sl) {
     const s = (plan.scenes ?? []).find((x) => x.id === b.id);
     if (s && !s.media) errs.push(`${b.id}: the brief gives this beat footage ("${b.footage}"): set its media to {"kind": "video", "query": "<what is in frame>"} and its block to null`);
   }
+  // A registry item the request names is used (mounted, merged or adapted): a real run swapped the requested
+  // code-typing block for a look-alike component.
+  const used = new Set((plan.scenes ?? []).flatMap((s) => [s.block, ...(s.components ?? []), ...(s.adapt ?? [])]).filter(Boolean));
+  for (const r of sl.requested ?? []) {
+    if (!used.has(r.name)) errs.push(`the request names ${r.name}: use it in the scene it belongs to (adapt it into a hand-built scene, or mount it), not a look-alike`);
+  }
   for (const s of plan.scenes ?? []) {
     if (s.media) {
       if (!stockEnabled()) errs.push(`${s.id}: no stock library is configured, so media must be null`);
       else if (!['video', 'photo'].includes(s.media.kind) || !String(s.media.query ?? '').trim()) errs.push(`${s.id}: media needs kind "video" or "photo" and a query`);
       else if (s.block) errs.push(`${s.id}: a scene with media is hand-built: set block to null`);
       else if ((s.layer ?? 'main') !== 'main') errs.push(`${s.id}: only a main scene takes media`);
+    }
+    if (s.adapt?.length) {
+      const unknown = s.adapt.filter((n) => !info[n]);
+      if (unknown.length) errs.push(`${s.id}: adapt names ${unknown.join(', ')}, which are not in the shortlists or the requested items`);
+      if (s.block) errs.push(`${s.id}: a scene that adapts an item is hand-built: set block to null`);
     }
     // Variables must belong to what the scene uses: its block, or its components.
     const used = [s.block, ...(s.components ?? [])].filter(Boolean).map((n) => info[n]).filter(Boolean);

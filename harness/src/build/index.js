@@ -34,7 +34,7 @@ async function pool(list, n, fn) {
   return out;
 }
 
-export async function runBuild(dir, { onEvent = () => {}, look = false, render = true, maxTokens = Number(process.env.BUILD_MAX_TOKENS ?? 150_000), signal } = {}) {
+export async function runBuild(dir, { onEvent = () => {}, look = false, render = true, maxTokens = Number(process.env.BUILD_MAX_TOKENS ?? 300_000), signal } = {}) {
   const ws = Workspace.open(dir);
   const plan = ws.readJson('plan.json');
   const brief = ws.readJson('brief.json');
@@ -56,6 +56,9 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
     const [inBefore, outBefore] = [usage.input, usage.output];
     const out = await askJson(provider, system, user, usage, { signal, parse, label, log: (call) => ws.logCall(call) }).catch((err) => {
       if (signal?.aborted) throw err;
+      // No credits, a bad key, no access: every later call fails the same way, and a film of placeholder
+      // scenes is worse than a clear stop.
+      if ([401, 402, 403].includes(err?.status)) throw new Error(`${provider.name}/${provider.model}: ${err.status} ${err.message}`);
       emit('error', { label, error: err.message });
       return null;
     });
@@ -268,6 +271,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
   if (look) {
     step('look');
     report.look = await lookAtFilm(ws, plan, scenes, looker, usage, maxTokens, emit, time);
+    if (report.look?.skipped) emit('look', { skipped: report.look.skipped, issues: [] });
     // An issue that names no problem is no instruction: a real run "repaired" a scene from one and shrank its copy.
     const toFix = (report.look?.issues ?? []).filter((i) => String(i.problem ?? '').trim().length > 8).map((i) => ({ i, s: scenes.find((x) => x.id === i.scene && x.mode === 'write') })).filter((x) => x.s);
     const before = new Map();

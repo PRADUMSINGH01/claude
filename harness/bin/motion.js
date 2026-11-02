@@ -75,7 +75,7 @@ function printBuildEvent(ev) {
     case 'check': return console.log(`  check ${ev.round}: ${ev.errors} errors, ${ev.warnings} warnings${ev.failing.length ? `; failing: ${ev.failing.join(', ')}` : ''}`);
     case 'measured': return console.log(ev.issues.length ? ev.issues.map((i) => `  ✗ ${i.id}: ${String(i.problem).slice(0, 220)}`).join('\n') : '  ✓ measured checks pass');
     case 'escalate': return console.log(ev.scenes.map((s) => `  ↑ ${s.id}: ${s.from} → written scene (${String(s.why).slice(0, 160)})`).join('\n'));
-    case 'look': return console.log(ev.issues.length ? ev.issues.map((i) => `  👁 ${i.scene}: ${i.problem} → ${i.fix}`).join('\n') : '  👁 no visible issues');
+    case 'look': return console.log(ev.skipped ? `  👁 look skipped: ${ev.skipped}` : ev.issues.length ? ev.issues.map((i) => `  👁 ${i.scene}: ${i.problem} → ${i.fix}`).join('\n') : '  👁 no visible issues');
     case 'cap': return console.log(`  ⛔ token cap reached (${k(ev.used)} of ${k(ev.maxTokens)}): ${ev.label} skipped, fallback used`);
     case 'error': return console.log(`  ✖ ${ev.label}: ${ev.error}`);
     case 'warning': return console.log(`  ⚠ ${ev.message}`);
@@ -117,9 +117,10 @@ function printPlanEvent(ev, { rating = true } = {}) {
         const comps = (ev.lists.components[beat] ?? []).map((i) => i.name);
         console.log(`  ${beat}: ${items.map((i) => i.name).join(', ') || '(no block fits → hand-build)'}${comps.length ? `   components: ${comps.join(', ')}` : ''}`);
       }
+      if (ev.lists.requested?.length) console.log(`  named in the request: ${ev.lists.requested.map((i) => i.name).join(', ')}`);
       return;
     case 'plan': {
-      for (const s of ev.plan.scenes) console.log(`  ${(s.layer ?? 'main').padEnd(10)} ${String(s.start).padStart(4)}–${+(s.start + s.duration).toFixed(2)}s  ${s.id}: ${s.block ?? 'hand-built'}${s.components?.length ? ` + ${s.components.join(', ')}` : ''}  ${Object.keys(s.vars ?? {}).length ? `vars ${JSON.stringify(s.vars).slice(0, 90)}` : ''}`);
+      for (const s of ev.plan.scenes) console.log(`  ${(s.layer ?? 'main').padEnd(10)} ${String(s.start).padStart(4)}–${+(s.start + s.duration).toFixed(2)}s  ${s.id}: ${s.block ?? 'hand-built'}${s.adapt?.length ? ` adapting ${s.adapt.join(', ')}` : ''}${s.components?.length ? ` + ${s.components.join(', ')}` : ''}  ${Object.keys(s.vars ?? {}).length ? `vars ${JSON.stringify(s.vars).slice(0, 90)}` : ''}`);
       console.log(`  theme: ${ev.plan.theme?.preset ?? JSON.stringify(ev.plan.theme?.colors ?? {})}`);
       if (ev.problems) console.log(`  ⚠ plan checks: ${ev.problems.split('\n').join(' | ').slice(0, 400)}`);
       if (rating) {

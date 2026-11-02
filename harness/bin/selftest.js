@@ -602,6 +602,20 @@ await step('a beat the brief gives footage must get media in the plan', async ()
   }
 });
 
+await step('registry items the request names can be adapted into a hand-built scene', async () => {
+  const { planChecks, namedCandidates } = await import('../src/plan.js');
+  // The names come from the request's own words (a corrupted \b once made this find nothing).
+  assert.deepEqual(namedCandidates('Adapt the code-typing and vfx-shatter registry blocks.'), ['code-typing', 'vfx-shatter']);
+  const typing = { name: 'code-typing', type: 'block', description: 'Token-streamed typing reveal', textVars: [], imageVars: [], colorVars: [], otherVars: [] };
+  const sl = { blocks: { term: [] }, components: {}, requested: [typing] };
+  const brief = { beats: [{ id: 'term', start: 0, end: 4, copy: ['npx skills add heygen-com/hyperframes'] }] };
+  const scene = { id: 'term', start: 0, duration: 4, text: brief.beats[0].copy, block: null, components: [], adapt: ['code-typing'], vars: {} };
+  assert.deepEqual(planChecks({ theme: {}, scenes: [scene] }, brief, sl), []);
+  assert.match(planChecks({ theme: {}, scenes: [{ ...scene, block: 'code-typing' }] }, brief, sl).join(), /adapts an item is hand-built/);
+  assert.match(planChecks({ theme: {}, scenes: [{ ...scene, adapt: ['made-up'] }] }, brief, sl).join(), /adapt names made-up/);
+  assert.match(planChecks({ theme: {}, scenes: [{ ...scene, adapt: [], components: ['code-terminal-run'] }] }, brief, sl).join(), /the request names code-typing: use it/, 'a look-alike does not count');
+});
+
 await step('ids a model leaves out are filled in code, never "undefined"', async () => {
   const { fillIds } = await import('../src/plan.js');
   // What GLM's story step returned: transitions with no id.

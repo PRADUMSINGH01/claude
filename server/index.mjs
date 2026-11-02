@@ -20,7 +20,7 @@ import {
   useProvider,
 } from '../harness/src/config.js';
 import { listThemes } from '../harness/src/tools/registry-tools.js';
-import { applyEvent, BillingError, billingConfigured, charge, creditCost, credits, effectiveTier, isAdmin, paywall, PLANS, portalLink, refund, startCheckout, syncFromDodo, verifyWebhook } from './billing.mjs';
+import { applyEvent, BillingError, billingConfigured, charge, creditCost, credits, effectiveTier, isAdmin, listPlans, paywall, PLANS, portalLink, refund, startCheckout, syncFromDodo, verifyWebhook } from './billing.mjs';
 
 const JOBS_DIR = config.jobsDir;
 // plan-build (default): plan in a few short calls, then code assembles and the model writes only
@@ -2373,6 +2373,17 @@ const server = http.createServer(async (req, res) => {
 
     if (pathname === '/api/billing/status' && method === 'GET') {
       return sendJson(req, res, 200, { success: true, configured: billingConfigured() });
+    }
+
+    // Public: the pricing page reads plans, credits and real prices from here (the same Dodo products checkout
+    // sells), and what a film costs in credits.
+    if (pathname === '/api/billing/plans' && method === 'GET') {
+      return sendJson(req, res, 200, {
+        success: true,
+        configured: billingConfigured(),
+        plans: await listPlans(),
+        creditsPerFilm: { 9: creditCost(9), 15: creditCost(15), 30: creditCost(30), 60: creditCost(60) },
+      });
     }
 
     // Dodo calls this. The signature is checked on the exact bytes received; each event is applied once.

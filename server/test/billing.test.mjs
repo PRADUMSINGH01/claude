@@ -87,6 +87,34 @@ test('sync from Dodo applies a payment whose webhook never came, and never refil
   assert.equal(user.billing.invoices.length, 1, 'the payment is recorded once');
 });
 
+test('plans carry the prices of the Dodo products checkout sells; an unreachable price is not cached', async (t) => {
+  const { listPlans } = await import('../billing.mjs');
+  let creatorUp = false;
+  const dodo = http.createServer((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (req.url === '/products/pdt_pro_m') return res.end(JSON.stringify({ price: { price: 800, currency: 'USD' } }));
+    if (req.url === '/products/pdt_cr_m' && creatorUp) return res.end(JSON.stringify({ price: { price: 500, currency: 'USD' } }));
+    res.statusCode = 500;
+    res.end('{}');
+  });
+  await new Promise((r) => dodo.listen(0, '127.0.0.1', r));
+  const keys = ['DODO_PAYMENTS_API_KEY', 'DODO_PAYMENTS_BASE_URL', 'DODO_PRODUCT_PRO_MONTHLY', 'DODO_PRODUCT_CREATOR_MONTHLY'];
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  Object.assign(process.env, { DODO_PAYMENTS_API_KEY: 'k', DODO_PAYMENTS_BASE_URL: `http://127.0.0.1:${dodo.address().port}`, DODO_PRODUCT_PRO_MONTHLY: 'pdt_pro_m', DODO_PRODUCT_CREATOR_MONTHLY: 'pdt_cr_m' });
+  t.after(() => {
+    dodo.close();
+    for (const k of keys) if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
+  });
+  const byTier = (plans) => Object.fromEntries(plans.map((p) => [p.tier, p]));
+  let plans = byTier(await listPlans());
+  assert.deepEqual(plans.pro.prices, { monthly: { amount: 8, currency: 'USD' }, annual: null });
+  assert.deepEqual([plans.pro.credits, plans.pro.purchasable, plans.free.purchasable, plans.enterprise.purchasable], [600, true, false, false]);
+  assert.equal(plans.creator.prices.monthly, null, 'Dodo failed: no price, not bought');
+  creatorUp = true;
+  plans = byTier(await listPlans());
+  assert.deepEqual(plans.creator.prices.monthly, { amount: 5, currency: 'USD' }, 'the failed lookup was not cached');
+});
+
 test('register → paywall → checkout → webhooks → invoices → plan change → portal', async (t) => {
   // A fake Dodo API that records what the server asks for.
   const calls = [];

@@ -146,6 +146,32 @@ export async function startCheckout({ user, tier, interval, returnUrl }) {
   return { kind: 'checkout', url: r.checkout_url, sessionId: r.session_id };
 }
 
+// What each plan gives and costs, for the pricing and billing pages. Prices come from the Dodo products the
+// server sells, so both pages show what checkout will charge. A plan with no product (or one Dodo can't
+// return) has no price and can't be bought. Kept ten minutes; a failed lookup is retried on the next ask.
+let plansCache = { at: 0, plans: null };
+export async function listPlans(now = Date.now()) {
+  if (plansCache.plans && now - plansCache.at < 10 * 60_000) return plansCache.plans;
+  let complete = true;
+  const priceOf = async (tier, interval) => {
+    const id = productFor(tier, interval);
+    if (!id || !billingConfigured()) return null;
+    try {
+      const p = (await dodo('GET', `/products/${encodeURIComponent(id)}`)).price ?? {};
+      return Number.isFinite(p.price) ? { amount: p.price / 100, currency: p.currency ?? 'USD' } : null;
+    } catch {
+      complete = false;
+      return null;
+    }
+  };
+  const plans = await Promise.all(Object.entries(PLANS).map(async ([tier, p]) => {
+    const prices = tier === 'free' ? { monthly: null, annual: null } : Object.fromEntries(await Promise.all(INTERVALS.map(async (i) => [i, await priceOf(tier, i)])));
+    return { tier, credits: p.credits, maxSeconds: p.maxSeconds, prices, purchasable: Object.values(prices).some(Boolean) };
+  }));
+  if (complete) plansCache = { at: now, plans };
+  return plans;
+}
+
 // Dodo's customer portal: payment method, invoices, cancel.
 export async function portalLink({ user, returnUrl }) {
   if (!billingConfigured()) throw new BillingError(503, 'Payments are not set up on this server yet.', 'BILLING_NOT_CONFIGURED');

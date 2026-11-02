@@ -43,6 +43,13 @@ The optional **look** step (on by default in `motion run` and the server; `--no-
 contact sheet to the **critic's** provider, so `CRITIC=<a provider with vision>` gives a visual review
 while a cheaper text model writes the scenes. Without vision it is skipped, and the build report says so.
 
+Speed: scene writes run as a pool (`BUILD_PARALLEL`, default 6). A `hyperframes check` costs ~20 s just to
+start a browser, so repair loops run a quick check (only the touched scenes' time span, no contrast pass)
+and the full check runs once; independent browser work (frame measurement and check, repairs and rewrites)
+runs side by side; shortlist searches run in parallel with item details cached across jobs for a week.
+`build-report.md` and the CLI print seconds per step and per kind of slow call, so speed work starts from
+numbers (render workers are left on HyperFrames' `auto`, which measured faster than a fixed count).
+
 Every plan and build model call is archived in `jobs/<id>/harness/calls/` (prompt, reply, tokens,
 `finish` reason; each system prompt stored once), so one call can be read or replayed with a new prompt.
 

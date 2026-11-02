@@ -6,7 +6,8 @@
   "description": "Backend REST API Server connecting the Byreel Next.js frontend to the HyperFrames multi-agent harness.",
   "scripts": {
     "start": "node --env-file-if-exists=../.env index.mjs",
-    "dev": "node --env-file-if-exists=../.env --watch index.mjs"
+    "dev": "node --env-file-if-exists=../.env --watch index.mjs",
+    "test": "node --test test/"
   },
   "dependencies": {
     "google-auth-library": "^11.3.2"

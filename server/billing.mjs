@@ -1,0 +1,224 @@
+// Plans, credits and Dodo Payments. A paid plan exists only because a verified Dodo webhook said so:
+// nothing a browser sends (a register form, a ?plan= link, POST /api/user/plan) can set one.
+import crypto from 'node:crypto';
+
+// Monthly credits per plan, as on the pricing page; the longest film each plan may order.
+export const PLANS = {
+  free: { credits: 15, maxSeconds: 15 },
+  creator: { credits: 200, maxSeconds: 60 },
+  pro: { credits: 600, maxSeconds: 60 },
+  enterprise: { credits: 2500, maxSeconds: 60 },
+};
+export const PAID_TIERS = ['creator', 'pro', 'enterprise'];
+const INTERVALS = ['monthly', 'annual'];
+const MONTH_MS = 30 * 24 * 3600 * 1000;
+
+// A film costs a credit per 3 seconds, at least 2: the free 15 credits make three 15 s drafts or five
+// 9 s B-roll clips, as the pricing page promises.
+export const creditCost = (seconds) => Math.max(2, Math.ceil(Number(seconds || 15) / 3));
+
+const env = (name) => (process.env[name] ?? '').trim();
+export const billingConfigured = () => Boolean(env('DODO_PAYMENTS_API_KEY'));
+const apiBase = () => env('DODO_PAYMENTS_BASE_URL') || (env('DODO_PAYMENTS_ENVIRONMENT') === 'live_mode' ? 'https://live.dodopayments.com' : 'https://test.dodopayments.com');
+
+// Dodo products, one per tier and interval: DODO_PRODUCT_CREATOR_MONTHLY, DODO_PRODUCT_PRO_ANNUAL, ...
+export const productFor = (tier, interval) => env(`DODO_PRODUCT_${String(tier).toUpperCase()}_${String(interval).toUpperCase()}`) || null;
+export function planForProduct(productId) {
+  for (const tier of PAID_TIERS) for (const interval of INTERVALS) if (productId && productFor(tier, interval) === productId) return { tier, interval };
+  return null;
+}
+
+// Owners and testers (ADMIN_EMAILS) work without paying.
+const isAdmin = (user) => env('ADMIN_EMAILS').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean).includes(String(user?.email).toLowerCase());
+
+// The tier a user gets right now. A paid tier counts only when it came from Dodo and the subscription is in
+// good standing: active, in its renewal grace period, or cancelled but paid until the period ends.
+export function effectiveTier(user, now = Date.now()) {
+  if (isAdmin(user)) return 'enterprise';
+  const p = user?.plan;
+  if (!p || p.source !== 'dodo' || !PAID_TIERS.includes(p.tier)) return 'free';
+  if (p.status === 'active' || p.status === 'past_due') return p.tier;
+  if (p.status === 'cancelled' && p.currentPeriodEnd && now < Date.parse(p.currentPeriodEnd)) return p.tier;
+  return 'free';
+}
+
+// The credit ledger for the current period. A paid period is renewed by its webhook; a free one (or a paid
+// one whose renewal is late) rolls over every 30 days.
+export function credits(user, now = Date.now()) {
+  user.usage ??= {};
+  const c = (user.usage.credits ??= { used: 0, periodStart: new Date(now).toISOString(), periodEnd: new Date(now + MONTH_MS).toISOString() });
+  if (now >= Date.parse(c.periodEnd)) {
+    c.used = 0;
+    c.periodStart = new Date(now).toISOString();
+    c.periodEnd = new Date(now + MONTH_MS).toISOString();
+  }
+  const tier = effectiveTier(user, now);
+  c.limit = PLANS[tier].credits;
+  c.tier = tier;
+  c.remaining = Math.max(0, c.limit - c.used);
+  return c;
+}
+
+// The paywall: may this user order a film this long? Returns null, or the 402 to send.
+export function paywall(user, seconds, now = Date.now()) {
+  const c = credits(user, now);
+  const plan = PLANS[c.tier];
+  if (seconds > plan.maxSeconds) {
+    return { code: 'PLAN_LIMIT', message: `The ${c.tier} plan makes films up to ${plan.maxSeconds} s. Upgrade for longer films.`, tier: c.tier, maxSeconds: plan.maxSeconds, upgradeUrl: '/pricing' };
+  }
+  const cost = creditCost(seconds);
+  if (c.remaining < cost) {
+    return { code: 'CREDITS_EXHAUSTED', message: `This film needs ${cost} credits and you have ${c.remaining} left this period.`, tier: c.tier, required: cost, remaining: c.remaining, resetsAt: c.periodEnd, upgradeUrl: '/pricing' };
+  }
+  return null;
+}
+
+export function charge(user, job, seconds) {
+  const c = credits(user);
+  job.userId = user.id;
+  job.credits = creditCost(seconds);
+  job.creditsRefunded = false;
+  c.used += job.credits;
+  c.remaining = Math.max(0, c.limit - c.used);
+}
+
+// A film that failed costs nothing. Once per job.
+export function refund(user, job) {
+  if (!user || !job.credits || job.creditsRefunded) return false;
+  const c = credits(user);
+  c.used = Math.max(0, c.used - job.credits);
+  c.remaining = Math.max(0, c.limit - c.used);
+  job.creditsRefunded = true;
+  return true;
+}
+
+export class BillingError extends Error {
+  constructor(status, message, code) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
+async function dodo(method, pathname, body) {
+  const res = await fetch(`${apiBase()}${pathname}`, {
+    method,
+    headers: { Authorization: `Bearer ${env('DODO_PAYMENTS_API_KEY')}`, 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(20_000),
+  });
+  const text = await res.text();
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch {
+    /* not JSON */
+  }
+  if (!res.ok) throw new BillingError(502, `Dodo Payments ${res.status}: ${String(json?.message ?? text).slice(0, 300)}`, 'PAYMENT_PROVIDER_ERROR');
+  return json ?? {};
+}
+
+// A new subscriber goes to Dodo's hosted checkout. A subscriber in good standing changes plan instead (no
+// second subscription); Dodo answers a change that needs a payment with a payment link.
+export async function startCheckout({ user, tier, interval, returnUrl }) {
+  if (!billingConfigured()) throw new BillingError(503, 'Payments are not set up on this server yet.', 'BILLING_NOT_CONFIGURED');
+  if (!PAID_TIERS.includes(tier) || !INTERVALS.includes(interval)) throw new BillingError(400, 'Choose creator, pro or enterprise, monthly or annual.', 'INVALID_PLAN');
+  const product = productFor(tier, interval);
+  if (!product) throw new BillingError(503, `The ${tier} ${interval} plan has no Dodo product configured (DODO_PRODUCT_${tier.toUpperCase()}_${interval.toUpperCase()}).`, 'BILLING_NOT_CONFIGURED');
+  const p = user.plan ?? {};
+  if (p.source === 'dodo' && p.subscriptionId && ['active', 'past_due'].includes(p.status)) {
+    if (p.tier === tier && p.billingInterval === interval) throw new BillingError(409, `You are already on ${tier} (${interval}).`, 'ALREADY_SUBSCRIBED');
+    const r = await dodo('POST', `/subscriptions/${encodeURIComponent(p.subscriptionId)}/change-plan`, {
+      product_id: product, quantity: 1, proration_billing_mode: 'prorated_immediately', return_url: returnUrl,
+      metadata: { user_id: user.id, tier, interval },
+    });
+    return { kind: 'change', url: r.payment_link ?? null };
+  }
+  const r = await dodo('POST', '/checkouts', {
+    product_cart: [{ product_id: product, quantity: 1 }],
+    customer: p.customerId ? { customer_id: p.customerId } : { email: user.email, name: user.profile?.displayName || user.email },
+    return_url: returnUrl,
+    metadata: { user_id: user.id, tier, interval },
+  });
+  if (!r.checkout_url) throw new BillingError(502, 'Dodo Payments returned no checkout link.', 'PAYMENT_PROVIDER_ERROR');
+  return { kind: 'checkout', url: r.checkout_url, sessionId: r.session_id };
+}
+
+// Dodo's customer portal: payment method, invoices, cancel.
+export async function portalLink({ user, returnUrl }) {
+  if (!billingConfigured()) throw new BillingError(503, 'Payments are not set up on this server yet.', 'BILLING_NOT_CONFIGURED');
+  const customerId = user.plan?.customerId;
+  if (!customerId) throw new BillingError(404, 'You have no subscription to manage yet.', 'NO_SUBSCRIPTION');
+  const r = await dodo('POST', `/customers/${encodeURIComponent(customerId)}/customer-portal/session?return_url=${encodeURIComponent(returnUrl)}`);
+  if (!r.link) throw new BillingError(502, 'Dodo Payments returned no portal link.', 'PAYMENT_PROVIDER_ERROR');
+  return r.link;
+}
+
+// Standard Webhooks, as Dodo signs them: HMAC-SHA256 over "id.timestamp.body" with the base64 secret after
+// "whsec_", sent as space-separated "v1,<base64>" entries. Five minutes of clock tolerance.
+export function verifyWebhook(rawBody, headers, secret = env('DODO_PAYMENTS_WEBHOOK_KEY'), now = Date.now()) {
+  const id = headers['webhook-id'];
+  const ts = headers['webhook-timestamp'];
+  const sig = headers['webhook-signature'];
+  if (!secret || !id || !ts || !sig) return false;
+  if (!Number.isFinite(Number(ts)) || Math.abs(now / 1000 - Number(ts)) > 300) return false;
+  const key = Buffer.from(secret.startsWith('whsec_') ? secret.slice(6) : secret, 'base64');
+  const expected = Buffer.from(crypto.createHmac('sha256', key).update(`${id}.${ts}.${rawBody}`).digest('base64'));
+  return String(sig).split(' ').some((part) => {
+    const given = Buffer.from(part.split(',')[1] ?? '');
+    return given.length === expected.length && crypto.timingSafeEqual(given, expected);
+  });
+}
+
+const iso = (v) => (v && Number.isFinite(Date.parse(v)) ? new Date(v).toISOString() : null);
+
+// Applies one verified event to the store. Returns what happened, for the log.
+export function applyEvent(db, event, now = Date.now()) {
+  const d = event?.data ?? {};
+  const type = String(event?.type ?? '');
+  const email = String(d.customer?.email ?? '').toLowerCase();
+  const user = db.users.find((u) => d.metadata?.user_id && u.id === d.metadata.user_id)
+    ?? db.users.find((u) => d.customer?.customer_id && u.plan?.customerId === d.customer.customer_id)
+    ?? db.users.find((u) => email && u.email === email);
+  if (!user) return `${type}: no user for ${d.metadata?.user_id ?? d.customer?.customer_id ?? email ?? 'unknown'}`;
+  const p = (user.plan ??= {});
+  if (d.customer?.customer_id) p.customerId = d.customer.customer_id;
+
+  if (type.startsWith('payment.')) {
+    user.billing ??= {};
+    const invoices = (user.billing.invoices ??= []);
+    const id = d.payment_id ?? event.id ?? `pay_${now}`;
+    if (!invoices.some((i) => i.id === id)) {
+      invoices.unshift({ id, status: type === 'payment.succeeded' ? 'paid' : 'failed', amount: Number(d.total_amount ?? 0) / 100, currency: d.currency ?? 'USD', subscriptionId: d.subscription_id ?? null, createdAt: iso(d.created_at) ?? new Date(now).toISOString() });
+      invoices.length = Math.min(invoices.length, 100);
+    }
+    return `${type}: ${user.email} ${d.total_amount ?? ''} ${d.currency ?? ''}`.trim();
+  }
+  if (!type.startsWith('subscription.')) return `${type}: ignored`;
+
+  const mapped = planForProduct(d.product_id);
+  if (d.subscription_id) p.subscriptionId = d.subscription_id;
+  const status = {
+    'subscription.active': 'active', 'subscription.renewed': 'active', 'subscription.plan_changed': 'active',
+    'subscription.past_due': 'past_due', 'subscription.on_hold': 'on_hold', 'subscription.paused': 'paused',
+    'subscription.cancelled': 'cancelled', 'subscription.expired': 'expired', 'subscription.failed': 'failed',
+  }[type] ?? (d.status === 'active' ? 'active' : d.status) ?? p.status;
+  if (['active', 'past_due'].includes(status) && !mapped) return `${type}: product ${d.product_id} is not a configured plan; ignored`;
+  if (mapped) {
+    p.tier = mapped.tier;
+    p.billingInterval = mapped.interval;
+  }
+  p.source = 'dodo';
+  p.status = status;
+  p.cancelAtPeriodEnd = Boolean(d.cancel_at_next_billing_date);
+  p.currentPeriodStart = iso(d.previous_billing_date) ?? p.currentPeriodStart ?? new Date(now).toISOString();
+  p.currentPeriodEnd = iso(d.next_billing_date) ?? p.currentPeriodEnd ?? null;
+  p.updatedAt = new Date(now).toISOString();
+  // A new subscription or a paid renewal starts a fresh allowance for the period Dodo just billed.
+  if (type === 'subscription.active' || type === 'subscription.renewed') {
+    user.usage ??= {};
+    user.usage.credits = { used: 0, periodStart: p.currentPeriodStart, periodEnd: p.currentPeriodEnd ?? new Date(now + MONTH_MS).toISOString() };
+  }
+  credits(user, now);
+  return `${type}: ${user.email} → ${p.tier} ${p.billingInterval ?? ''} ${p.status}`.trim();
+}

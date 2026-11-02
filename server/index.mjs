@@ -19,6 +19,7 @@ import {
   useProvider,
 } from '../harness/src/config.js';
 import { listThemes } from '../harness/src/tools/registry-tools.js';
+import { applyEvent, BillingError, billingConfigured, charge, credits, effectiveTier, paywall, portalLink, refund, startCheckout, verifyWebhook } from './billing.mjs';
 
 const JOBS_DIR = config.jobsDir;
 // plan-build (default): plan in a few short calls, then code assembles and the model writes only
@@ -28,7 +29,7 @@ const PIPELINE = process.env.PIPELINE === 'agents' ? 'agents' : 'plan-build';
 const SKILLS_DIR = config.skillsDir;
 
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(SERVER_DIR, 'data');
+const DATA_DIR = process.env.SERVER_DATA_DIR || path.join(SERVER_DIR, 'data');
 const DB_PATH = path.join(DATA_DIR, 'db.json');
 
 const PORT = Number(process.env.PORT || process.env.API_PORT || 8080);
@@ -67,8 +68,9 @@ function defaultUser(overrides = {}) {
   const parts = displayName.trim().split(/\s+/);
   const firstName = parts[0] || 'Pradum';
   const lastName = parts.slice(1).join(' ') || 'Singh';
-  const tier = overrides.tier || 'pro';
-  const billingInterval = overrides.billingInterval || 'annual';
+  // Every account starts free; only a verified Dodo webhook gives it a paid plan (billing.mjs).
+  const tier = overrides.tier || 'free';
+  const billingInterval = overrides.billingInterval || 'monthly';
 
   const tierLimits = {
     free: { generations: 10, renders: 5, apiCalls: 100, storage: 1024 * 1024 * 1024 },
@@ -112,10 +114,10 @@ function defaultUser(overrides = {}) {
           : ['150 AI Motion Generations / month', '1080p 60FPS MP4 Export', 'Standard SVG Typography'],
     },
     usage: {
-      generations: { daily: 2, monthly: 14, lifetime: 42, limit: tierLimits.generations },
-      renders: { daily: 1, monthly: 6, lifetime: 18, limit: tierLimits.renders },
-      apiCalls: { daily: 12, monthly: 240, lifetime: 1240, limit: tierLimits.apiCalls },
-      storage: { usedBytes: 38 * 1024 * 1024, limitBytes: tierLimits.storage },
+      generations: { daily: 0, monthly: 0, lifetime: 0, limit: tierLimits.generations },
+      renders: { daily: 0, monthly: 0, lifetime: 0, limit: tierLimits.renders },
+      apiCalls: { daily: 0, monthly: 0, lifetime: 0, limit: tierLimits.apiCalls },
+      storage: { usedBytes: 0, limitBytes: tierLimits.storage },
       lastResetAt: now,
       nextResetAt: nextMonth,
     },
@@ -246,6 +248,10 @@ function sanitizeUser(u) {
   if (!u) return null;
   const copy = { ...u };
   delete copy.passwordHash;
+  // The app shows the plan the user really has (a tier stored without a Dodo payment is not one) and the
+  // credits left this period.
+  copy.plan = { ...u.plan, tier: effectiveTier(u), storedTier: u.plan?.tier ?? null };
+  copy.usage = { ...u.usage, credits: { ...credits(u) } };
   return copy;
 }
 
@@ -265,9 +271,10 @@ function upsertGoogleUser({ googleId, email, name, picture, plan }) {
     user = defaultUser({
       email: normalizedEmail,
       name: name || normalizedEmail.split('@')[0],
-      tier: ['free', 'creator', 'pro', 'enterprise'].includes(plan) ? plan : 'free',
       provider: 'google',
     });
+    // The plan picked on the pricing page is remembered for checkout, never granted.
+    if (['creator', 'pro', 'enterprise'].includes(plan)) user.plan.intended = plan;
     user.googleId = googleId;
     if (picture) user.profile.avatarUrl = picture;
     db.users.push(user);
@@ -855,6 +862,11 @@ async function drainQueue() {
     job.canRetry = Boolean(job.harnessJobId);
     job.updatedAt = new Date().toISOString();
     pushLog(job, `FAILED: ${job.error}`);
+    // A film that failed costs nothing.
+    if (refund(db.users.find((u) => u.id === job.userId), job)) {
+      pushLog(job, `Refunded ${job.credits} credits`);
+      saveDb();
+    }
     persistJobRecord(job);
   } finally {
     activeAbortControllers.delete(job.promptId);
@@ -972,6 +984,30 @@ function getAuthenticatedUser(req) {
   }
 
   return null;
+}
+
+// The body exactly as sent: a webhook's signature covers these bytes, not a re-serialised JSON.
+function readRawBody(req, maxBytes = 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    req.on('data', (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        reject(new Error('Request body too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+
+// Where the browser app lives, for checkout and portal return links.
+function frontendUrl(req) {
+  return (process.env.FRONTEND_URL || req.headers.origin || 'http://localhost:3000').replace(/\/+$/, '');
 }
 
 function readBody(req, maxBytes = 15 * 1024 * 1024) {
@@ -1295,13 +1331,9 @@ const server = http.createServer(async (req, res) => {
         );
       }
 
-      const user = defaultUser({
-        email,
-        name,
-        password,
-        tier: ['free', 'creator', 'pro', 'enterprise'].includes(plan) ? plan : 'pro',
-        provider: 'email',
-      });
+      const user = defaultUser({ email, name, password, provider: 'email' });
+      // The plan picked on the pricing page is remembered for checkout, never granted.
+      if (['creator', 'pro', 'enterprise'].includes(plan)) user.plan.intended = plan;
       user.passwordHash = hashPassword(password);
       db.users.push(user);
 
@@ -1657,24 +1689,18 @@ const server = http.createServer(async (req, res) => {
         return sendError(req, res, 401, 'Please sign in to manage your plan.', 'UNAUTHORIZED');
       }
 
-      const body = await readBody(req);
-      const tier = ['free', 'creator', 'pro', 'enterprise'].includes(body.tier) ? body.tier : 'pro';
-      const interval = body.interval === 'monthly' ? 'monthly' : 'annual';
-      user.plan.tier = tier;
-      user.plan.billingInterval = interval;
-      user.plan.status = 'active';
-      saveDb();
-      return sendJson(req, res, 200, {
-        success: true,
-        message: `Subscription updated to ${tier.toUpperCase()} (${interval})`,
-        user: sanitizeUser(user),
-      });
+      // This endpoint used to set any tier for free. Plans now change only through Dodo: checkout for a new or
+      // different plan, the customer portal to cancel.
+      return sendError(req, res, 402, 'Plans change through checkout: use POST /api/billing/checkout, or the billing portal to cancel.', 'USE_CHECKOUT');
     }
 
     // =========================================================================
     // 3. PROMPT QUEUE & MULTI-AGENT HARNESS ORCHESTRATION
     // =========================================================================
     if (pathname === '/api/prompt' && method === 'POST') {
+      // Films cost credits, so they need an account (this used to bill anonymous requests to the first user).
+      const user = getAuthenticatedUser(req);
+      if (!user) return sendError(req, res, 401, 'Please sign in to make a video.', 'UNAUTHORIZED');
       const body = await readBody(req);
       const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
       if (!prompt) {
@@ -1701,6 +1727,13 @@ const server = http.createServer(async (req, res) => {
         ? Math.max(5, Math.min(60, Math.round(Number(body.length))))
         : 15;
       const inheritedTheme = resolveThemeFromJob(body.themeFrom);
+
+      // The paywall: the plan's longest film and the credits left this period.
+      const blocked = paywall(user, durationS);
+      if (blocked) {
+        saveDb();
+        return sendJson(req, res, 402, { success: false, error: blocked.code, ...blocked });
+      }
 
       // Model & Provider selection from frontend
       const validProviders = ['azure', 'glm', 'claude', 'openai', 'gemini'];
@@ -1752,16 +1785,15 @@ const server = http.createServer(async (req, res) => {
       };
       pushLog(job, `Prompt queued: "${prompt.slice(0, 120)}" [${provider}/${model} · ${effort}]`);
 
+      // Charged on submit, refunded if the film fails (see the job's failure path).
+      charge(user, job, durationS);
       persistJobRecord(job);
-
-      // Update user generation counter
-      const user = getAuthenticatedUser(req) || db.users[0];
-      if (user?.usage?.generations) {
+      if (user.usage?.generations) {
         user.usage.generations.daily += 1;
         user.usage.generations.monthly += 1;
         user.usage.generations.lifetime += 1;
-        saveDb();
       }
+      saveDb();
 
       enqueueHarnessExecution({
         job,
@@ -1782,8 +1814,17 @@ const server = http.createServer(async (req, res) => {
       syncDiskJobs();
       const job = jobsByPromptId.get(promptId) || jobsByHarnessId.get(promptId);
 
-      if (!job) {
+      // A retry is a new attempt by the job's owner: it pays again, since a failed film was refunded.
+      const user = getAuthenticatedUser(req);
+      if (!user) return sendError(req, res, 401, 'Please sign in to retry.', 'UNAUTHORIZED');
+      if (!job || (job.userId && job.userId !== user.id)) {
         return sendError(req, res, 404, `Job "${promptId}" not found`, 'JOB_NOT_FOUND');
+      }
+      if (!job.credits || job.creditsRefunded) {
+        const blocked = paywall(user, job.durationS || 15);
+        if (blocked) return sendJson(req, res, 402, { success: false, error: blocked.code, ...blocked });
+        charge(user, job, job.durationS || 15);
+        saveDb();
       }
 
       const resumeDir = job.harnessJobId ? path.join(JOBS_DIR, job.harnessJobId) : null;
@@ -2159,26 +2200,75 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    // =========================================================================
+    // BILLING: Dodo Payments checkout, customer portal, webhooks, invoices (billing.mjs)
+    // =========================================================================
     if (pathname === '/api/billing/invoices' && method === 'GET') {
-      return sendJson(req, res, 200, {
-        success: true,
-        invoices: [
-          {
-            id: 'INV-2026-1001',
-            date: 'Oct 01, 2026',
-            description: 'Studio Pro - Annual Subscription',
-            amount: '$59.00 USD',
-            status: 'paid',
-          },
-          {
-            id: 'INV-2026-0901',
-            date: 'Sep 01, 2026',
-            description: 'Studio Pro - Annual Subscription',
-            amount: '$59.00 USD',
-            status: 'paid',
-          },
-        ],
-      });
+      const user = getAuthenticatedUser(req);
+      if (!user) return sendError(req, res, 401, 'Please sign in to see your invoices.', 'UNAUTHORIZED');
+      const invoices = (user.billing?.invoices ?? []).map((i) => ({
+        id: i.id,
+        date: new Date(i.createdAt).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }),
+        description: `Byreel ${user.plan?.tier ?? ''} subscription`.replace(/\s+/g, ' ').trim(),
+        amount: `${i.currency === 'USD' ? '$' : ''}${i.amount.toFixed(2)} ${i.currency}`,
+        status: i.status,
+      }));
+      return sendJson(req, res, 200, { success: true, invoices });
+    }
+
+    if (pathname === '/api/billing/checkout' && method === 'POST') {
+      const user = getAuthenticatedUser(req);
+      if (!user) return sendError(req, res, 401, 'Please sign in to subscribe.', 'UNAUTHORIZED');
+      const body = await readBody(req);
+      try {
+        const r = await startCheckout({
+          user,
+          tier: String(body.tier || '').toLowerCase(),
+          interval: body.interval === 'annual' ? 'annual' : 'monthly',
+          returnUrl: `${frontendUrl(req)}/billing?checkout=success`,
+        });
+        return sendJson(req, res, 200, { success: true, ...r });
+      } catch (err) {
+        if (err instanceof BillingError) return sendError(req, res, err.status, err.message, err.code);
+        throw err;
+      }
+    }
+
+    if (pathname === '/api/billing/portal' && method === 'POST') {
+      const user = getAuthenticatedUser(req);
+      if (!user) return sendError(req, res, 401, 'Please sign in to manage billing.', 'UNAUTHORIZED');
+      try {
+        const url = await portalLink({ user, returnUrl: `${frontendUrl(req)}/billing` });
+        return sendJson(req, res, 200, { success: true, url });
+      } catch (err) {
+        if (err instanceof BillingError) return sendError(req, res, err.status, err.message, err.code);
+        throw err;
+      }
+    }
+
+    if (pathname === '/api/billing/status' && method === 'GET') {
+      return sendJson(req, res, 200, { success: true, configured: billingConfigured() });
+    }
+
+    // Dodo calls this. The signature is checked on the exact bytes received; each event is applied once.
+    if (pathname === '/api/billing/webhook' && method === 'POST') {
+      const raw = await readRawBody(req);
+      if (!verifyWebhook(raw, req.headers)) return sendError(req, res, 401, 'Invalid webhook signature.', 'INVALID_SIGNATURE');
+      const id = String(req.headers['webhook-id']);
+      db.webhookIds ??= [];
+      if (db.webhookIds.includes(id)) return sendJson(req, res, 200, { success: true, duplicate: true });
+      let event;
+      try {
+        event = JSON.parse(raw);
+      } catch {
+        return sendError(req, res, 400, 'Webhook body is not JSON.', 'BAD_REQUEST');
+      }
+      const result = applyEvent(db, event);
+      db.webhookIds.push(id);
+      if (db.webhookIds.length > 1000) db.webhookIds.splice(0, db.webhookIds.length - 1000);
+      saveDb();
+      console.log(`[billing] ${result}`);
+      return sendJson(req, res, 200, { success: true });
     }
 
     if (pathname === '/api/motion/char-conversion' && method === 'POST') {

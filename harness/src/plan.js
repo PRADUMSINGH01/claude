@@ -23,13 +23,19 @@ const BRIEF_SHAPE = `{
   "audio": "none | sfx | music",
   "look": { "preset": "<preset name or null>", "colors": { "ground": "#hex", "ink": "#hex", "accent": "#hex", "<more names, e.g. coral, lime>": "#hex" }, "fonts": ["Family"], "mood": "3-6 words" },
   "background": { "wanted": true|false, "description": "what it should look like, or empty" },
-  "beats": [ { "id": "kebab-id", "start": 0, "end": 5, "copy": ["exact on-screen text"], "intent": "what it does visually, 2-5 words, for a registry search" } ],
+  "beats": [ { "id": "kebab-id", "start": 0, "end": 5, "copy": ["exact on-screen text"], "intent": "what it does visually, 2-5 words, for a registry search", "footage": "what real stock footage behind the copy shows, 3-8 words, or empty" } ],
   "overlays": [ { "id": "kebab-id", "start": 0, "end": 12, "copy": ["exact text"], "position": "top | bottom | corner", "intent": "2-5 words" } ],
   "transitions": [ { "id": "t-1", "at": 3, "kind": "cover | handoff", "style": "e.g. colour flood, block wipe, iris, slice wipe, whip, blur swap", "duration": 0.6 } ],
   "must": ["hard requirements from the prompt"],
   "avoid": ["things the prompt rules out"],
   "assumptions": ["what you decided where the prompt was silent"]
 }`;
+
+// Whether a beat shows real footage is decided here, where the request is read: by the plan step the beats are
+// already shaped as typography, and a planner told "use media where it fits" kept every scene type only.
+const FOOTAGE_RULE = stockEnabled()
+  ? '- footage: real stock footage plays behind a beat\'s copy (a free library, searched by these words). When the request is about something real (an activity like surfing or running, a place, nature, food and drink, a city, a physical product category), give 1-2 beats footage: the hook, or the beat that carries the feeling; say what is in frame (subject, setting, light), no text, no brand names. Never on the wordmark, the end card or a chart beat. Empty on every beat when the request asks for type only, or the subject is one specific product, person or logo. When the request itself asks for footage or photos, follow it.'
+  : '- footage is always empty (no stock library is configured).';
 
 const UNDERSTAND_SYSTEM = `You turn a video request into a precise brief. Reply with JSON only, in this shape:
 ${BRIEF_SHAPE}
@@ -44,7 +50,8 @@ Rules:
 - look.preset only when the request (or the app settings) names a preset: presets are slide-deck looks, never the fallback for a film. Otherwise leave it null and fill look.colors and look.fonts.
 - When the request gives no colours or fonts, take them from the subject's own world (its era, its materials, where it would be shown), never from habit. Avoid the defaults generated video lands on unless the request asks for them: ${GENERATED_FONTS.join(', ')} as fonts; a near-black or navy void as the ground; purple or blue gradients; a cream-paper ground with a serif display. Fonts are real Google Fonts families.
 - Defaults when silent: 1920x1080, 30 fps, 15 s, audio "none". Record every default you applied in assumptions.
-- background.wanted is true only when the request asks for a visual background layer (a shader, gradient, aurora, texture, pattern, footage) running under the beats. A background colour ("dark background", "white space") is look.colors.ground, not a layer.`;
+- background.wanted is true only when the request asks for a visual background layer (a shader, gradient, aurora, texture, pattern, footage) running under the beats. A background colour ("dark background", "white space") is look.colors.ground, not a layer.
+${FOOTAGE_RULE}`;
 
 const INSTRUCTION_WORDS = /\b(show|display|on[- ]screen|use only|make sure|should|add a|include)\b/i;
 const LAYER_WORDS = /(animat|shader|aurora|gradient|texture|pattern|particle|noise|footage|moving|alive|living|evolving|loop|grid)/i;
@@ -193,6 +200,7 @@ Rules:
 - Beats run back to back from 0 to format.duration, shaped by the picked storyline and the guide's beat shares scaled to the length. Each beat is readable (at least 2 s, and 1 s + 0.3 s a word of its copy) and something new happens every 2–4 s. Each intent says what the beat does visually in 2–5 words, from the storyline's device and form, for a registry search (never "title card" for every beat).
 - transitions: one per seam where the picked form carries the cut ("cover": colour flood, block/slice wipe, iris; "handoff": whip, blur swap, match cut, push), "at" exactly on the seam, duration 0.3–1.2 s, varied; at most a third of the seams are plain cuts (no entry). Keep the input brief's overlays.
 - Nothing from the guide's tells (§8) or the BANNED defaults: no three cards in a row, no logo alone on frame 0, no "Introducing" opener.
+- footage: keep the input brief's footage ideas on the beats that carry those moments (at most 2 beats, never the wordmark, end card or a chart); the picked storyline may reword what is in frame.
 
 <story-guide>
 ${guides.story}
@@ -359,7 +367,7 @@ Rules:
 - With a background layer, every main block must let it show through: set its background/ground variable to "transparent" (never a solid colour), and say in build to clear any opaque ground in its CSS.
 - Theme: if the brief names a preset, theme is exactly {"preset": "<that name>"} (its own colours and fonts apply). Otherwise a custom theme with the brief's colours and fonts. SPEC.md may use only theme colours (#FFFFFF/#000000 allowed). Colour variables take colours, never "transparent" (only background/ground variables may be transparent).
 ${stockEnabled()
-    ? `- media: real footage or a photo from a free stock library (Pexels), as the scene's full-frame backdrop under its copy. Use it where the film is about real things (a place, people, an activity, nature, a physical product category) and the storyline shows them; leave it null for type-led scenes, charts, wordmarks and end cards, and for anything that must be one specific real product, person or logo (stock can't show those). query: what is in frame in 3-8 concrete English words (subject, setting, light), no text, no brand names. "video" for anything that moves, "photo" for a still. A scene with media is hand-built (block null); its build says where the copy sits and how dark the scrim over the media is.`
+    ? `- media: real footage or a photo from a free stock library (Pexels), as the scene's full-frame backdrop under its copy. Every beat with footage in the brief gets media {"kind": "video", "query": its footage, refined}. Beyond those: when the request is about something real (an activity like surfing or running, a place, nature, food and drink, a city, a physical product category), give 1-2 main scenes media: the hook, or the beat that carries the feeling. Never the wordmark, the end card or a chart, and never more than half the scenes. Leave every media null when the request asks for type only, or for anything that must be one specific real product, person or logo (stock can't show those). query: what is in frame in 3-8 concrete English words (subject, setting, light), no text, no brand names. "video" for anything that moves, "photo" for a still. A scene with media is hand-built (block null); its build says where the copy sits and how dark the scrim over the media is.`
     : '- media is always null (no stock library is configured): every scene is type, shapes and lines; never plan photographs, people or hands.'}
 - spec follows the template below, with numbers instead of adjectives.
 
@@ -401,6 +409,12 @@ export function planChecks(plan, brief, sl) {
   const errs = [];
   const info = Object.fromEntries(allItems(sl).map((i) => [i.name, i]));
   const varsOf = (i) => [...i.textVars, ...i.imageVars, ...i.colorVars, ...i.otherVars];
+  // The brief decided which beats show real footage; the plan carries it out.
+  for (const b of brief.beats ?? []) {
+    if (!stockEnabled() || !String(b.footage ?? '').trim()) continue;
+    const s = (plan.scenes ?? []).find((x) => x.id === b.id);
+    if (s && !s.media) errs.push(`${b.id}: the brief gives this beat footage ("${b.footage}"): set its media to {"kind": "video", "query": "<what is in frame>"} and its block to null`);
+  }
   for (const s of plan.scenes ?? []) {
     if (s.media) {
       if (!stockEnabled()) errs.push(`${s.id}: no stock library is configured, so media must be null`);

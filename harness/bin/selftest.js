@@ -586,6 +586,22 @@ await step('stock media: lightest sharp file, downloaded and credited; scenes an
   }
 });
 
+await step('a beat the brief gives footage must get media in the plan', async () => {
+  const { planChecks } = await import('../src/plan.js');
+  const saved = process.env.PEXELS_API_KEY;
+  process.env.PEXELS_API_KEY = 'test-key';
+  try {
+    const brief = { beats: [{ id: 'hook', start: 0, end: 4, copy: ['Is it worth paddling out?'], footage: 'surfer paddling out at dawn' }, { id: 'name', start: 4, end: 7, copy: ['Tidepool'], footage: '' }] };
+    const sl = { blocks: {}, components: {} };
+    const scenes = [{ id: 'hook', start: 0, duration: 4, text: ['Is it worth paddling out?'], block: null }, { id: 'name', start: 4, duration: 3, text: ['Tidepool'], block: null }];
+    assert.match(planChecks({ theme: {}, scenes }, brief, sl).join(), /hook: the brief gives this beat footage/);
+    scenes[0].media = { kind: 'video', query: 'surfer paddling out at dawn, empty beach' };
+    assert.deepEqual(planChecks({ theme: {}, scenes }, brief, sl), []);
+  } finally {
+    if (saved === undefined) delete process.env.PEXELS_API_KEY; else process.env.PEXELS_API_KEY = saved;
+  }
+});
+
 await step('ids a model leaves out are filled in code, never "undefined"', async () => {
   const { fillIds } = await import('../src/plan.js');
   // What GLM's story step returned: transitions with no id.

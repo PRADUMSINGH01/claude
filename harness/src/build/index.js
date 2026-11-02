@@ -268,7 +268,8 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
   if (look) {
     step('look');
     report.look = await lookAtFilm(ws, plan, scenes, looker, usage, maxTokens, emit, time);
-    const toFix = (report.look?.issues ?? []).map((i) => ({ i, s: scenes.find((x) => x.id === i.scene && x.mode === 'write') })).filter((x) => x.s);
+    // An issue that names no problem is no instruction: a real run "repaired" a scene from one and shrank its copy.
+    const toFix = (report.look?.issues ?? []).filter((i) => String(i.problem ?? '').trim().length > 8).map((i) => ({ i, s: scenes.find((x) => x.id === i.scene && x.mode === 'write') })).filter((x) => x.s);
     const before = new Map();
     await pool(toFix, PARALLEL, async ({ i, s }) => {
       before.set(s.id, fs.readFileSync(sceneFile(ws, s), 'utf8'));
@@ -277,9 +278,11 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
       if (html && !staticProblems(html, s.id, s.duration, s.text, s.stock?.file).length) fs.writeFileSync(sceneFile(ws, s), html);
     });
     if (toFix.length) {
+      // A repair that leaves a measured problem the scene did not have before is undone (made it small, blank, cut).
+      const wasSmall = new Set(report.measured.filter((i) => i.kind === 'small').map((i) => i.id));
       const [c, blank] = await Promise.all([quickCheck(toFix.map(({ s }) => s)), measureFilm(toFix.map(({ s }) => s))]);
       for (const { s } of toFix) {
-        const broke = findingsFor(c, s.file).some((f) => f.startsWith('[error]')) || blank.some((b) => b.id === s.id && b.kind !== 'small');
+        const broke = findingsFor(c, s.file).some((f) => f.startsWith('[error]')) || blank.some((b) => b.id === s.id && (b.kind !== 'small' || !wasSmall.has(s.id)));
         if (broke) {
           fs.writeFileSync(sceneFile(ws, s), before.get(s.id));
           report.scenes[s.id].lookRepair = 'reverted: the repair broke the scene';

@@ -16,8 +16,7 @@ import {
   config,
   providerStatus,
   providerForRole,
-  useEffort,
-  useProvider,
+  withRunSettings,
 } from '../harness/src/config.js';
 import { listThemes } from '../harness/src/tools/registry-tools.js';
 import { applyEvent, BillingError, billingConfigured, charge, creditCost, credits, effectiveTier, isAdmin, listPlans, paywall, PLANS, portalLink, refund, startCheckout, syncFromDodo, verifyWebhook } from './billing.mjs';
@@ -132,7 +131,13 @@ function defaultUser(overrides = {}) {
   };
 }
 
-const JWT_SECRET = process.env.JWT_SECRET || 'byreel-studio-jwt-secret-secure-key';
+// Signs sign-in tokens and media links. The fallback is public (it is in this file), so production refuses to
+// start without a real one: with it anyone could sign a token for any user.
+const JWT_SECRET = process.env.JWT_SECRET || (process.env.NODE_ENV === 'production' ? '' : 'byreel-studio-jwt-secret-secure-key');
+if (!JWT_SECRET) {
+  console.error('[motion-studio-server] JWT_SECRET is not set. Refusing to start in production: sign-ins could be forged. Set a long random JWT_SECRET in .env.');
+  process.exit(1);
+}
 
 function hashPassword(pw, salt = null) {
   if (!salt) {
@@ -178,12 +183,10 @@ function verifyToken(token) {
   if (parts.length !== 3) return null;
   const [, payload, sig] = parts;
   try {
+    // Only the configured secret: a second, built-in "legacy" secret let anyone who read this file sign in as
+    // any user.
     const expectedSig = crypto.createHmac('sha256', JWT_SECRET).update(payload).digest('base64url');
-    const legacySig = crypto.createHmac('sha256', 'byreel-studio-local-secret').update(payload).digest('base64url');
-
-    const matchesCurrent = sig.length === expectedSig.length && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig));
-    const matchesLegacy = sig.length === legacySig.length && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(legacySig));
-    if (!matchesCurrent && !matchesLegacy) return null;
+    if (!(sig.length === expectedSig.length && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig)))) return null;
 
     const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
     if (decoded.exp && Date.now() > decoded.exp) return null;
@@ -211,21 +214,7 @@ function loadDb() {
   const initial = {
     users: [seedUser],
     sessions: {},
-    apiKeys: [
-      {
-        id: 'key_88f9104',
-        userId: seedUser.id,
-        name: 'Production CLI Render Key',
-        prefix: 'byreel_live_sk_89f0',
-        environment: 'production',
-        scopes: ['render', 'prompt:read', 'prompt:write'],
-        rateLimitPerMinute: 60,
-        status: 'active',
-        createdAt: new Date(Date.now() - 5 * 86400000).toISOString(),
-        lastUsedAt: new Date(Date.now() - 3600000).toISOString(),
-        expiresAt: null,
-      },
-    ],
+    apiKeys: [],
     promptMap: {}, // promptId -> PromptJob record
     conversations: [],
     brandKits: {},
@@ -244,6 +233,17 @@ function saveDb(data = db) {
 }
 
 const db = loadDb();
+
+// Sessions belong to the secret they were signed under. When it changes (set for the first time, or rotated
+// after a leak) every session ends, including any token forged with an old public secret and saved here.
+const sessionSecretTag = crypto.createHash('sha256').update(JWT_SECRET).digest('hex').slice(0, 16);
+if (db.sessionSecretTag !== sessionSecretTag) {
+  db.sessions = {};
+  db.sessionSecretTag = sessionSecretTag;
+  saveDb();
+}
+
+const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 
 function sanitizeUser(u) {
   if (!u) return null;
@@ -294,9 +294,6 @@ const activeAbortControllers = new Map();
 const jobQueue = [];
 let activeJobCount = 0;
 const MAX_CONCURRENT_JOBS = Number(process.env.MAX_CONCURRENT_JOBS || 1);
-// Each film sets the shared harness config (provider, model, effort) when it starts; these are the models to
-// return to when a film names none.
-const DEFAULT_MODELS = Object.fromEntries(Object.entries(config.providers).map(([name, p]) => [name, p.model]));
 
 function readJsonSafe(filePath) {
   try {
@@ -840,31 +837,25 @@ async function drainQueue() {
     pushLog(job, job.activity);
     persistJobRecord(job);
 
-    // Per-job provider, model and reasoning effort, all three set every time so nothing carries over from the
-    // film before (the config is shared: this assumes MAX_CONCURRENT_JOBS=1). The effort reaches every role.
-    if (job.provider && config.providers[job.provider]) {
-      try {
-        useProvider(job.provider);
-        config.providers[job.provider].model = job.model || DEFAULT_MODELS[job.provider];
-      } catch (err) {
-        console.warn(`[server] Warning: Could not configure provider ${job.provider}: ${err.message}`);
-      }
-    }
-    useEffort(job.effort);
+    // This film's provider, model and reasoning effort, for every role and only for this film: films run side
+    // by side (MAX_CONCURRENT_JOBS), and none changes another's settings.
+    const settings = config.providers[job.provider]
+      ? { provider: job.provider, model: job.model || undefined, effort: job.effort }
+      : { effort: job.effort };
 
     const onEvent = createHarnessEventHandler(job);
     // A resumed job keeps the pipeline it started with.
     const resumedMode = mode === 'resume' ? readJsonSafe(path.join(resumeDir, 'harness', 'request.json'))?.mode : null;
     const usePlanBuild = mode === 'resume' ? resumedMode === 'plan-build' : PIPELINE === 'plan-build';
     pushLog(job, `Pipeline: ${usePlanBuild ? 'plan + build' : 'agents'}`);
-    const result = await (usePlanBuild ? runFilm : runJob)({
+    const result = await withRunSettings(settings, () => (usePlanBuild ? runFilm : runJob)({
       prompt: mode === 'resume' ? undefined : job.prompt,
       options: mode === 'resume' ? {} : options,
       resume: mode === 'resume' ? resumeDir : undefined,
       jobsDir: JOBS_DIR,
       onEvent,
       signal: controller.signal,
-    });
+    }));
 
     if (result?.job) {
       job.harnessJobId = result.job;
@@ -1007,9 +998,13 @@ function getAuthenticatedUser(req) {
   }
 
   // 4. API key header (x-api-key)
+  // The whole key, checked against its stored hash. Matching only the prefix let anyone who guessed four hex
+  // characters (or read the seeded one in this file) act as the key's owner. A key made before hashes were
+  // stored has none and no longer signs in: its owner makes a new one.
   const apiKeyHeader = req.headers['x-api-key'];
   if (apiKeyHeader) {
-    const keyRec = db.apiKeys.find((k) => k.status === 'active' && apiKeyHeader.startsWith(k.prefix));
+    const hash = sha256(apiKeyHeader);
+    const keyRec = db.apiKeys.find((k) => k.status === 'active' && k.secretHash === hash && (!k.expiresAt || Date.parse(k.expiresAt) > Date.now()));
     if (keyRec) {
       keyRec.lastUsedAt = new Date().toISOString();
       saveDb();
@@ -1782,7 +1777,7 @@ const server = http.createServer(async (req, res) => {
       // Model & Provider selection from frontend
       const validProviders = ['azure', 'glm', 'claude', 'openai', 'gemini', 'openrouter'];
       let provider = validProviders.includes(body.provider) ? body.provider : (config.roles.builder || 'azure');
-      let model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : (DEFAULT_MODELS[provider] || 'qwen--qwen38-27b');
+      let model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : (config.providers[provider]?.model || 'qwen--qwen38-27b');
       const validEfforts = ['low', 'medium', 'high', 'xhigh', 'max'];
       let effort = validEfforts.includes(body.effort) ? body.effort : (config.providers[provider]?.effort || 'high');
       if (effort === 'max') effort = 'xhigh';
@@ -2056,7 +2051,7 @@ const server = http.createServer(async (req, res) => {
       if (!user) {
         return sendError(req, res, 401, 'Please sign in to view your API keys.', 'UNAUTHORIZED');
       }
-      const activeKeys = db.apiKeys.filter((k) => k.status === 'active' && k.userId === user.id);
+      const activeKeys = db.apiKeys.filter((k) => k.status === 'active' && k.userId === user.id).map(({ secretHash, ...k }) => k);
       return sendJson(req, res, 200, {
         success: true,
         keys: activeKeys,
@@ -2080,6 +2075,7 @@ const server = http.createServer(async (req, res) => {
         userId: user.id,
         name: String(body.name || 'Studio CLI Key').trim(),
         prefix,
+        secretHash: sha256(rawSecret),
         environment: body.environment === 'development' ? 'development' : 'production',
         scopes: Array.isArray(body.scopes) && body.scopes.length ? body.scopes : ['render', 'prompt:read', 'prompt:write'],
         rateLimitPerMinute: 60,
@@ -2095,7 +2091,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(req, res, 201, {
         success: true,
         message: 'API Key created successfully',
-        apiKey,
+        apiKey: { ...apiKey, secretHash: undefined },
         secretKey: rawSecret,
       });
     }

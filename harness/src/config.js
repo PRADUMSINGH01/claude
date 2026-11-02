@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -144,9 +145,17 @@ export function useEffort(effort) {
   config.runEffort = effort || '';
 }
 
+// One film's provider, model and effort, seen by everything that film runs (its async work included) and by
+// nothing else: the server runs films side by side, and a shared setting would let one film's choice
+// overwrite another's mid-run.
+const runSettings = new AsyncLocalStorage();
+export const withRunSettings = (settings, fn) => runSettings.run(settings ?? {}, fn);
+
 export function providerForRole(role) {
-  const name = config.roles[role];
-  const p = config.providers[name] && { ...config.providers[name], effort: config.runEffort || ROLE_EFFORT[role] || config.providers[name].effort };
+  const run = runSettings.getStore() ?? {};
+  const name = run.provider || config.roles[role];
+  const base = config.providers[name];
+  const p = base && { ...base, model: (run.provider && run.model) || base.model, effort: run.effort || config.runEffort || ROLE_EFFORT[role] || base.effort };
   if (!p) throw new Error(`Unknown provider "${name}" for ${role}; use one of ${Object.keys(providers).join(', ')}`);
   if (!p.apiKey) throw new Error(`Provider "${name}" (${role}) has no API key; set ${KEY_VAR[name] ?? 'its key'} in .env`);
   if (!p.baseURL) throw new Error(`Provider "${name}" (${role}) has no base URL`);

@@ -626,6 +626,17 @@ await step('an effort chosen for the run reaches every role, scene writing inclu
     assert.deepEqual(['planner', 'builder', 'critic', 'fixer'].map((r) => providerForRole(r).effort), ['low', 'low', 'low', 'low']);
     useEffort('');
     assert.equal(providerForRole('builder').effort, process.env.BUILDER_EFFORT || 'medium', 'cleared: back to the role default');
+    // Two films at once on the server: each sees only its own provider, model and effort, across awaits.
+    const { withRunSettings } = await import('../src/config.js');
+    config.providers.fake2 = { ...config.providers.fake, model: 'fake2-default' };
+    const film = (settings) => withRunSettings(settings, async () => {
+      await new Promise((r) => setTimeout(r, 5));
+      const p = providerForRole('builder');
+      return [p.name, p.model, p.effort];
+    });
+    assert.deepEqual(await Promise.all([film({ provider: 'fake', model: 'm-a', effort: 'low' }), film({ provider: 'fake2', effort: 'high' })]),
+      [['fake', 'm-a', 'low'], ['fake2', 'fake2-default', 'high']]);
+    assert.equal(providerForRole('builder').model, 'fake', 'outside a film, the shared settings are untouched');
   } finally {
     useEffort('');
     Object.assign(config.roles, roles);

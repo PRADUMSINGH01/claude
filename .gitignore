@@ -5,3 +5,4 @@ jobs/
 *.log
 # runtime store written by server/index.mjs (users, sessions, keys)
 server/data/
+.claude/settings.local.json

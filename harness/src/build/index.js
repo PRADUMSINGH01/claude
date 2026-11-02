@@ -73,10 +73,30 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
     emit('warning', { message: report.warnings.at(-1) });
   }
 
+  // Where the time goes, measured: seconds per step, and count + seconds per kind of slow call (each check or
+  // snapshot starts a browser). In build-report.md, so speed work starts from numbers.
+  report.timings = { steps: {}, calls: {} };
+  const time = async (kind, work) => {
+    const t = Date.now();
+    try {
+      return await work;
+    } finally {
+      const c = (report.timings.calls[kind] ??= { count: 0, seconds: 0 });
+      c.count += 1;
+      c.seconds = +(c.seconds + (Date.now() - t) / 1000).toFixed(1);
+    }
+  };
+  let current = null;
+  const closeStep = () => {
+    if (current) report.timings.steps[current.name] = +((Date.now() - current.at) / 1000).toFixed(1);
+  };
+
   await ensureBrowser();
   ws.setState({ stage: 'building' });
   const step = (name) => {
     signal?.throwIfAborted();
+    closeStep();
+    current = { name, at: Date.now() };
     emit('step', { step: name });
   };
 
@@ -97,8 +117,9 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
   // and skip contrast (measured about 3x faster). Static lint still covers the whole project.
   const quickCheck = (list) => {
     const range = list.length ? `${Math.min(...list.map((s) => s.start))},${Math.max(...list.map((s) => s.start + s.duration))}` : null;
-    return runCheck(ws, ['--no-contrast', ...(range ? ['--range', range] : [])]);
+    return time('quick check', runCheck(ws, ['--no-contrast', ...(range ? ['--range', range] : [])]));
   };
+  const measureFilm = (list) => measure(ws, plan, list, time);
   const rewriteIndex = () => fs.writeFileSync(path.join(ws.projectDir, 'index.html'), indexHtml(plan, scenes, asm.roles, fontCss, themeColors));
 
   // 2–3. Write and verify the scenes the model has to write.
@@ -152,7 +173,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
   // 4. Verify the film: check + measured. Readability problems count even when check calls them warnings.
   //    A written scene with issues gets one repair; a mounted/block scene is escalated to the writer once.
   step('verify film');
-  let issues = await measure(ws, plan, scenes);
+  let issues = await measureFilm(scenes);
   // A block or mounted item whose only problem is its size is scaled in code; a written scene is told to.
   const scaled = [];
   for (const s of scenes.filter((x) => x.mode !== 'write')) {
@@ -175,7 +196,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
       emit('scaled', { scenes: scaled.map((s) => ({ id: s.id, k: s.scale.k })) });
     }
   }
-  const check = await runCheck(ws);
+  const check = await time('full check', runCheck(ws));
   const MUST_FIX = /^\[error\]|text_below_floor|contrast|offscreen|clipped|overflow|cut_off/;
   for (const s of scenes) {
     const found = findingsFor(check, s.file).filter((f) => MUST_FIX.test(f));
@@ -220,7 +241,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
   // 5. Look (optional): one vision call over the contact sheet; write-mode scenes get one repair.
   if (look) {
     step('look');
-    report.look = await lookAtFilm(ws, plan, scenes, looker, usage, maxTokens, emit);
+    report.look = await lookAtFilm(ws, plan, scenes, looker, usage, maxTokens, emit, time);
     const toFix = (report.look?.issues ?? []).map((i) => ({ i, s: scenes.find((x) => x.id === i.scene && x.mode === 'write') })).filter((x) => x.s);
     const before = new Map();
     await pool(toFix, PARALLEL, async ({ i, s }) => {
@@ -231,7 +252,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
     });
     if (toFix.length) {
       const c = await quickCheck(toFix.map(({ s }) => s));
-      const blank = await measure(ws, plan, toFix.map(({ s }) => s));
+      const blank = await measureFilm(toFix.map(({ s }) => s));
       for (const { s } of toFix) {
         const broke = findingsFor(c, s.file).some((f) => f.startsWith('[error]')) || blank.some((b) => b.id === s.id && b.kind !== 'small');
         if (broke) {
@@ -246,23 +267,26 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
   // 6. Render + verify.
   if (render) {
     step('render');
-    const r = await renderFinal(ws, (t, d) => emit(t, d));
+    const r = await time('render', renderFinal(ws, (t, d) => emit(t, d)));
     report.render = r.ok ? await verifyOutput(ws, plan) : { ok: false, log: r.log };
   }
 
+  closeStep();
   report.usage = { input: usage.input, output: usage.output, calls: usage.calls, minutes: +((Date.now() - t0) / 60000).toFixed(1) };
   ws.writeJson('build-report.json', report);
   fs.writeFileSync(ws.meta('build-report.md'), reportMarkdown(report, plan));
   const prev = ws.readJson('usage.json', {});
   ws.writeJson('usage.json', { ...prev, builder: { input: usage.input, output: usage.output, turns: usage.calls, runs: 1 } });
-  emit('done', { report: ws.meta('build-report.md'), video: report.render?.ok ? path.join(ws.projectDir, 'renders', 'final.mp4') : null, usage: report.usage });
+  emit('done', { report: ws.meta('build-report.md'), video: report.render?.ok ? path.join(ws.projectDir, 'renders', 'final.mp4') : null, usage: report.usage, timings: report.timings });
   return report;
 }
 
 // Measured checks (no model): a planned background must show; a scene with copy must not be blank.
-async function measure(ws, plan, scenes) {
+async function measure(ws, plan, scenes, time = (_kind, work) => work) {
   const issues = [];
-  const layers = await layerEvidence(ws, plan);
+  // Only a background layer can be covered by an opaque scene; the layer frames cost a snapshot, so skip them
+  // when there is none (transitions and overlays used to trigger it for nothing).
+  const layers = scenes.some((s) => s.layer === 'background') ? await time('snapshot', layerEvidence(ws, plan)) : { issues: [] };
   for (const i of layers.issues) issues.push({ id: /scene (\S+)/.exec(i.where)?.[1], problem: i.evidence });
   const covers = scenes.filter((s) => s.layer === 'transition');
   const mids = covers.map((s) => +(s.start + s.duration / 2).toFixed(2));
@@ -280,7 +304,7 @@ async function measure(ws, plan, scenes) {
   // One snapshot for every frame below: each snapshot call starts a browser (~20 s), so never two.
   const times = [...new Set([...mids, ...at, ...tails.map(tailAt)])];
   if (!times.length) return issues;
-  const res = await hfJson(ws, ['snapshot', '--at', times.join(','), '--no-end'], { timeoutSec: config.commandTimeoutSec });
+  const res = await time('snapshot', hfJson(ws, ['snapshot', '--at', times.join(','), '--no-end'], { timeoutSec: config.commandTimeoutSec }));
   const byTime = new Map((res.json?.frames ?? []).map((f) => [Number(f.time), f.path]));
   const pct = (x) => `${Math.round(x * 100)}%`;
   // The frames are measured in parallel: each measurement is its own short ffmpeg run.
@@ -406,14 +430,14 @@ function lookProvider() {
   }
 }
 
-async function lookAtFilm(ws, plan, scenes, provider, usage, maxTokens, emit) {
+async function lookAtFilm(ws, plan, scenes, provider, usage, maxTokens, emit, time = (_kind, work) => work) {
   if (provider.error) return { skipped: provider.error };
   if (!provider.vision) return { skipped: `${provider.name}/${provider.model} cannot see images; set CRITIC to a provider with vision` };
   if (usage.input + usage.output >= maxTokens) return { skipped: 'token cap' };
   // After entrances and reveals have finished (a frame mid-reveal reads as half-typed text).
   const shown = scenes.filter((s) => !['background', 'transition'].includes(s.layer));
   const at = shown.map((s) => lookTime(s));
-  const res = await hfJson(ws, ['snapshot', '--at', at.join(','), '--no-end'], { timeoutSec: config.commandTimeoutSec });
+  const res = await time('snapshot', hfJson(ws, ['snapshot', '--at', at.join(','), '--no-end'], { timeoutSec: config.commandTimeoutSec }));
   const sheet = res.json?.contactSheets?.[0];
   if (!sheet) return { skipped: 'no contact sheet' };
   const img = await imageMessage(provider, 'Contact sheet, frames in scene order:', [sheet]);
@@ -429,13 +453,21 @@ async function lookAtFilm(ws, plan, scenes, provider, usage, maxTokens, emit) {
   return out;
 }
 
+// "write scenes 50s · verify film 117s … | full check 1× 41s · snapshot 2× 38s …"
+export function timingLine(t) {
+  if (!t) return '';
+  const steps = Object.entries(t.steps).map(([k, v]) => `${k} ${Math.round(v)}s`).join(' · ');
+  const calls = Object.entries(t.calls).map(([k, v]) => `${k} ${v.count}× ${Math.round(v.seconds)}s`).join(' · ');
+  return [steps, calls].filter(Boolean).join(' | ');
+}
+
 function reportMarkdown(r, plan) {
   const rows = Object.entries(r.scenes).map(([id, s]) => `| ${id} | ${s.mode}${s.escalatedFrom ? ` (escalated from ${s.escalatedFrom})` : ''} | ${s.item ?? '-'} | ${s.attempts} | ${s.result}${s.why ? `: ${[].concat(s.why).join('; ').slice(0, 200)}` : ''} |`);
   return `# Build report: ${plan.title ?? r.job}
 
 - Provider: ${r.provider}
 - Tokens: ${r.usage.input} in / ${r.usage.output} out over ${r.usage.calls} calls
-- Time: ${r.usage.minutes} min
+- Time: ${r.usage.minutes} min (${timingLine(r.timings)})
 - Video: ${r.render?.ok ? `renders/final.mp4, ${r.render.duration}s, ${r.render.size}` : r.render ? `render failed or did not verify` : 'not rendered'}
 
 ## Scenes

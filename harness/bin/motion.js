@@ -9,7 +9,7 @@ import { config, providerStatus, useProvider } from '../src/config.js';
 import { runJob } from '../src/orchestrator.js';
 import { runFilm } from '../src/film.js';
 import { runPlan } from '../src/plan.js';
-import { runBuild } from '../src/build/index.js';
+import { runBuild, timingLine } from '../src/build/index.js';
 import { SkillLibrary } from '../src/skills/library.js';
 import { skillMap } from '../src/tools/skill-tools.js';
 import { listThemes } from '../src/tools/registry-tools.js';
@@ -84,6 +84,7 @@ function printBuildEvent(ev) {
     case 'done': return console.log(`
 ■ done: ${ev.usage.calls} model calls, ${k(ev.usage.input)} in / ${k(ev.usage.output)} out, ${ev.usage.minutes} min
   video: ${ev.video ?? '(none)'}
+  time: ${timingLine(ev.timings)}
   report: ${ev.report}`);
     default: return undefined;
   }

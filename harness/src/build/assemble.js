@@ -9,6 +9,7 @@ import { applyTheme, registryAdd } from '../tools/registry-tools.js';
 import { prepareFonts } from './fonts.js';
 import { themeRoles, tokenCss } from './tokens.js';
 import { fallbackScene } from './scene-files.js';
+import { copySfx, placeSfx, sfxMarkup } from './sfx.js';
 
 const TRACK = { background: 0, main: 1, overlay: 2, transition: 3 };
 const Z = { background: 0, main: 10, overlay: 20, transition: 30 };
@@ -198,10 +199,14 @@ export async function assemble(ws, plan, brief, { emit = () => {} } = {}) {
     fs.writeFileSync(path.join(ws.projectDir, s.file), fallbackScene(s, plan.format, roles));
   }
 
-  fs.writeFileSync(path.join(ws.projectDir, 'index.html'), indexHtml(plan, scenes, roles, fonts.css, themeJson.colors));
+  // Sound effects: placed once from the plan's cues (or the default ones), unless the brief is silent.
+  const sfx = brief?.audio === 'none' ? [] : placeSfx(plan);
+  copySfx(ws.projectDir, sfx);
+  if (sfx.length) emit('assemble', { step: 'sfx', cues: sfx.map((c) => ({ name: c.name, start: c.start })) });
+  fs.writeFileSync(path.join(ws.projectDir, 'index.html'), indexHtml(plan, scenes, roles, fonts.css, themeJson.colors, sfx));
   ws.chownAgentDirs();
   emit('assemble', { step: 'index', scenes: scenes.map((s) => ({ id: s.id, mode: s.mode, item: s.item })) });
-  return { roles, fonts: fonts.report, items, scenes, warnings };
+  return { roles, fonts: fonts.report, items, scenes, warnings, sfx };
 }
 
 function host(s, format) {
@@ -222,7 +227,7 @@ function host(s, format) {
   ].filter(Boolean).join('\n');
 }
 
-export function indexHtml(plan, scenes, roles, fontCss, colors) {
+export function indexHtml(plan, scenes, roles, fontCss, colors, sfx = []) {
   const { width, height, duration } = plan.format;
   const order = [...scenes].sort((a, b) => (Z[a.layer] ?? 10) - (Z[b.layer] ?? 10) || a.start - b.start);
   return `<!doctype html>
@@ -241,7 +246,7 @@ ${fontCss ? `${fontCss.split('\n').map((l) => `      ${l}`).join('\n')}\n` : ''}
   <body>
     <!-- Assembled by the harness from plan.json: one host per scene. Layers: background 0, main 1, overlay 2. -->
     <div id="root" data-composition-id="main" data-start="0" data-duration="${duration}" data-width="${width}" data-height="${height}">
-${order.map((s) => host(s, plan.format)).join('\n')}
+${order.map((s) => host(s, plan.format)).join('\n')}${sfx.length ? `\n${sfxMarkup(sfx)}` : ''}
     </div>
     <script>
       window.__timelines = window.__timelines || {};

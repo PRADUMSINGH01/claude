@@ -9,6 +9,7 @@ import { catalogSearch, inspectItem, listThemes, registryHas } from './tools/reg
 import { opaqueOverBackground, plannerHandoff } from './roles/planner.js';
 import { Workspace } from './workspace.js';
 import { stockEnabled } from './media/stock.js';
+import { sfxMenu } from './build/sfx.js';
 
 // ---- 1. Understand -----------------------------------------------------------
 
@@ -49,7 +50,7 @@ Rules:
 - Colours: put EVERY colour the request gives into look.colors, hex exactly as written: ground, ink and accent for the main roles, then one named key per extra colour (e.g. "coral": "#FF5A5F"). If it names a theme preset, set look.preset and leave colors empty. Fonts as named.
 - look.preset only when the request (or the app settings) names a preset: presets are slide-deck looks, never the fallback for a film. Otherwise leave it null and fill look.colors and look.fonts.
 - When the request gives no colours or fonts, take them from the subject's own world (its era, its materials, where it would be shown), never from habit. Avoid the defaults generated video lands on unless the request asks for them: ${GENERATED_FONTS.join(', ')} as fonts; a near-black or navy void as the ground; purple or blue gradients; a cream-paper ground with a serif display. Fonts are real Google Fonts families.
-- Defaults when silent: 1920x1080, 30 fps, 15 s, audio "none". Record every default you applied in assumptions.
+- Defaults when silent: 1920x1080, 30 fps, 15 s, audio "sfx" (sound effects on cuts and hits). audio is "none" only when the request asks for a silent video (no sound, mute, silent). Record every default you applied in assumptions.
 - background.wanted is true only when the request asks for a visual background layer (a shader, gradient, aurora, texture, pattern, footage) running under the beats. A background colour ("dark background", "white space") is look.colors.ground, not a layer.
 ${FOOTAGE_RULE}`;
 
@@ -352,7 +353,7 @@ const PLAN_SHAPE = `{
     "purpose": "what the viewer takes from it", "text": ["exact copy"],
     "block": "<registry name from the shortlist, or null to hand-build>", "components": [], "adapt": [],
     "vars": { "<variable id of the block or its components>": "<value>" },
-    "build": "layout and objects in numbers (px, %, hex)", "motion": "the one hero move, eases, hand-off", "sound": "",
+    "build": "layout and objects in numbers (px, %, hex)", "motion": "the one hero move, eases, hand-off", "sound": [ { "name": "<a sound from the library>", "at": 0.4 } ],
     "media": null OR { "kind": "video | photo", "query": "what is in frame, 3-8 concrete words" }
   } ],
   "audio": { "music": null, "sfx": null, "voiceover": null },
@@ -385,6 +386,10 @@ Rules:
 ${stockEnabled()
     ? `- media: real footage or a photo from a free stock library (Pexels), as the scene's full-frame backdrop under its copy. Every beat with footage in the brief gets media {"kind": "video", "query": its footage, refined}. Beyond those: when the request is about something real (an activity like surfing or running, a place, nature, food and drink, a city, a physical product category), give 1-2 main scenes media: the hook, or the beat that carries the feeling. Never the wordmark, the end card or a chart, and never more than half the scenes. Leave every media null when the request asks for type only, or for anything that must be one specific real product, person or logo (stock can't show those). query: what is in frame in 3-8 concrete English words (subject, setting, light), no text, no brand names. "video" for anything that moves, "photo" for a still. A scene with media is hand-built (block null); its build says where the copy sits and how dark the scrim over the media is.`
     : '- media is always null (no stock library is configured): every scene is type, shapes and lines; never plan photographs, people or hands.'}
+- sound: the scene's sound effects, from this library only (name: when to use it). Each cue {"name", "at"}: at is the second in the scene where the visual hit lands (the logo slams, the cut, the text starts typing); the sound is placed so its loudest moment lands there. 0 to 2 cues a scene, never on every element: a whoosh on a cut or fast move, an impact as the logo or headline lands, a riser into the big reveal (it needs about 3 s before its hit), typing as text types, a pop or click as a UI element appears. When the brief's audio is "none", every sound is [].
+<sound-library>
+${sfxMenu()}
+</sound-library>
 - spec follows the template below, with numbers instead of adjectives.
 
 <spec-template>
@@ -677,12 +682,14 @@ function settingsText(options = {}) {
   if (ASPECT[options.aspect]) lines.push(`- Aspect ${options.aspect}: ${ASPECT[options.aspect].join('x')}.`);
   if (options.duration) lines.push(`- Duration: ${options.duration} s, unless the request itself gives a length.`);
   if (options.theme && listThemes().some((t) => t.name === options.theme)) lines.push(`- Theme preset: ${options.theme} (set look.preset).`);
+  if (options.sound === false) lines.push('- Sound: off (audio "none").');
   return lines.length ? `\n\nSettings chosen in the app:\n${lines.join('\n')}` : '';
 }
 
 export function checkSettings(brief, options = {}) {
   const want = ASPECT[options.aspect];
   if (want && (brief.format?.width !== want[0] || brief.format?.height !== want[1])) return [`format must be ${want.join('x')} (aspect ${options.aspect} was chosen in the app)`];
+  if (options.sound === false && brief.audio !== 'none') return ['audio must be "none" (sound was turned off in the app)'];
   return [];
 }
 

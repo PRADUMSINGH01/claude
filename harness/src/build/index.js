@@ -124,7 +124,8 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
     return time('quick check', runCheck(ws, ['--no-contrast', ...(range ? ['--range', range] : [])]));
   };
   const measureFilm = (list) => measure(ws, plan, list, time);
-  const rewriteIndex = () => fs.writeFileSync(path.join(ws.projectDir, 'index.html'), indexHtml(plan, scenes, asm.roles, fontCss, themeColors));
+  const rewriteIndex = () => fs.writeFileSync(path.join(ws.projectDir, 'index.html'), indexHtml(plan, scenes, asm.roles, fontCss, themeColors, asm.sfx));
+  report.sfx = asm.sfx;
 
   // 2–3. Write and verify the scenes the model has to write.
   const writeAndVerify = async (targets) => {
@@ -538,6 +539,10 @@ ${r.measured.length ? r.measured.map((i) => `- ${i.id}: ${i.problem}`).join('\n'
 ## Look
 
 ${r.look ? (r.look.skipped ? `- skipped: ${r.look.skipped}` : (r.look.issues ?? []).map((i) => `- ${i.scene}: ${i.problem} → ${i.fix}`).join('\n') || '- no issues') : '- off'}
+
+## Sound effects
+
+${(r.sfx ?? []).length ? r.sfx.map((c) => `- ${c.start}s ${c.name} (${c.duration}s, volume ${c.volume})`).join('\n') : '- none'}
 
 ## Warnings
 

@@ -68,6 +68,7 @@ function printBuildEvent(ev) {
     case 'assemble':
       if (ev.step === 'theme') return console.log(`  theme: ground ${ev.roles.ground} ink ${ev.roles.ink} accent ${ev.roles.accent} · fonts ${ev.fonts.map((f) => `${f.family} (${f.how})`).join(', ')}`);
       if (ev.step === 'install') return console.log(`  install ${ev.name} (${ev.kind}${ev.kind === 'component' ? (ev.mountable ? ', mountable' : ', snippet') : ''})`);
+      if (ev.step === 'sfx') return console.log(`  sound: ${ev.cues.map((c) => `${c.name} ${c.start}s`).join(', ')}`);
       return undefined;
     case 'assembled':
       for (const s of ev.scenes) console.log(`  ${s.id}: ${s.mode}${s.item ? ` ${s.item}` : ''}`);

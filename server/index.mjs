@@ -1793,6 +1793,8 @@ const server = http.createServer(async (req, res) => {
         provider,
         model,
         effort,
+        // Sound effects are on unless the app turned them off.
+        ...(body.sound === false ? { sound: false } : {}),
         // Saved in the job folder's request.json, so the film keeps its owner across restarts.
         userId: user.id,
         ...(inheritedTheme ? { theme: inheritedTheme } : {}),

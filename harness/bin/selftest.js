@@ -602,6 +602,66 @@ await step('a beat the brief gives footage must get media in the plan', async ()
   }
 });
 
+await step('sound effects land their loudest moment on the cue, inside the film, spaced and capped', async () => {
+  const { placeSfx, sfxLibrary, sfxMarkup } = await import('../src/build/sfx.js');
+  const lib = sfxLibrary();
+  assert.ok(lib.length >= 19, `the bundled library is there (${lib.length} sounds)`);
+  const plan = (scenes) => ({ format: { duration: 12 }, scenes });
+  const scene = (id, start, duration, sound, layer = 'main') => ({ id, start, duration, sound, layer });
+
+  // A whoosh peaks 0.17 s in: cued at 4.0 s, it starts at 3.83 s. An impact peaks at once.
+  let cues = placeSfx(plan([scene('a', 0, 4, []), scene('b', 4, 8, [{ name: 'whoosh', at: 0 }, { name: 'Impact Bass 1', at: 1 }])]), lib);
+  assert.deepEqual(cues.map((c) => [c.name, c.start]), [['whoosh', 3.83], ['impact-bass-1', 4.9]]);
+  assert.match(sfxMarkup(cues), /<audio id="sfx-1" class="clip" src="assets\/sfx\/whoosh\.mp3" data-start="3\.83" data-duration="0\.36" data-track-index="20" data-volume="0\.35"><\/audio>/);
+
+  // The riser peaks 3.02 s in: a hit at 1 s has no room to build up, a hit at 5 s does.
+  assert.deepEqual(placeSfx(plan([scene('a', 0, 12, [{ name: 'riser', at: 1 }])]), lib), []);
+  assert.equal(placeSfx(plan([scene('a', 0, 12, [{ name: 'riser', at: 5 }])]), lib)[0].start, 1.98);
+
+  // Unknown names and hits closer than 0.25 s are dropped; a sound cut off by the film's end fades out.
+  cues = placeSfx(plan([scene('a', 0, 12, [{ name: 'explosion', at: 1 }, { name: 'pop', at: 2 }, { name: 'click', at: 2.1 }, { name: 'chime', at: 11.5 }])]), lib);
+  assert.deepEqual(cues.map((c) => c.name), ['pop', 'chime']);
+  assert.ok(cues[1].start + cues[1].duration <= 12 && cues[1].fadeOut > 0, 'trimmed at the end, with a fade');
+
+  // Different families layer on one moment (whoosh into impact), at most two; the same family there is dropped.
+  cues = placeSfx(plan([scene('a', 0, 12, [{ name: 'whoosh', at: 3 }, { name: 'impact-bass-1', at: 3.02 }, { name: 'sparkle', at: 3.05 }, { name: 'whoosh-short', at: 6 }, { name: 'whoosh', at: 6.1 }])]), lib);
+  assert.deepEqual(cues.map((c) => c.name), ['whoosh', 'impact-bass-1', 'whoosh-short']);
+
+  // Too many moments: the cap (one per 1.2 s) keeps the end card's hit and drops later middle ones.
+  const busy = Array.from({ length: 10 }, (_, i) => ({ name: i % 2 ? 'pop' : 'click', at: i * 0.5 }));
+  cues = placeSfx({ format: { duration: 6 }, scenes: [scene('a', 0, 5, busy), scene('end', 5, 1, [{ name: 'impact-bass-1', at: 0.2 }])] }, lib);
+  assert.equal(cues.length, 5, 'five moments in six seconds');
+  assert.equal(cues.at(-1).name, 'impact-bass-1', 'the closing hit survives the cap');
+  assert.deepEqual(cues.map((c) => c.start), [...cues.map((c) => c.start)].sort((x, y) => x - y), 'in time order');
+
+  // No cues in the plan: a whoosh on each cut, a hit as the last scene lands. Overlays don't count as cuts.
+  cues = placeSfx(plan([scene('a', 0, 4, undefined), scene('b', 4, 4, undefined), scene('c', 8, 4, undefined), scene('o', 2, 3, undefined, 'overlay')]), lib);
+  assert.deepEqual(cues.map((c) => c.name), ['whoosh', 'whoosh', 'impact-bass-1']);
+});
+
+await step('the sound shapes match the files (loudest moment re-measured with ffmpeg)', async () => {
+  const { SFX_DIR, SHAPE } = await import('../src/build/sfx.js');
+  const { execFileSync } = await import('node:child_process');
+  for (const name of ['riser', 'whoosh-cinematic', 'impact-bass-1', 'whoosh']) {
+    let pcm;
+    try {
+      pcm = execFileSync(process.env.HYPERFRAMES_FFMPEG_PATH || 'ffmpeg', ['-v', 'error', '-i', path.join(SFX_DIR(), `${name}.mp3`), '-ac', '1', '-ar', '8000', '-f', 's16le', '-'], { maxBuffer: 1 << 26 });
+    } catch {
+      return; // no ffmpeg here: nothing to compare against
+    }
+    const win = 400;
+    let best = 0;
+    let at = 0;
+    for (let s = 0; s + win <= pcm.length / 2; s += 80) {
+      let e = 0;
+      for (let i = s; i < s + win; i++) e += pcm.readInt16LE(i * 2) ** 2;
+      if (e > best) [best, at] = [e, s];
+    }
+    const peak = (at + win / 2) / 8000;
+    assert.ok(Math.abs(peak - SHAPE[name][0]) < 0.15, `${name}: measured peak ${peak.toFixed(2)} s, table says ${SHAPE[name][0]} s`);
+  }
+});
+
 await step('a composition that needs WebGPU is found, so a GPU-less host renders it in software', async () => {
   const { requiresWebgpu } = await import('../src/orchestrator.js');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webgpu-'));

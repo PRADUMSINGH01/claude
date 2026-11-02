@@ -33,6 +33,16 @@ const providers = {
     effort: str('GLM_EFFORT', ''),
     vision: bool('GLM_VISION', false),
   },
+  // One key for many vendors' models (OpenAI-compatible). Ids are "vendor/model"; a bare "deepseek-v4.1-flash"
+  // gets its vendor from its first word. OPENROUTER_* and OPEN_ROUTER_* names both work.
+  openrouter: {
+    kind: 'openrouter',
+    apiKey: str('OPENROUTER_API_KEY', str('OPEN_ROUTER_API_KEY')),
+    baseURL: str('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1/'),
+    model: ((m) => (m.includes('/') ? m : `${m.split('-')[0]}/${m}`))(str('OPENROUTER_MODEL', str('OPEN_ROUTER_MODEL', 'deepseek/deepseek-v4.1-flash'))),
+    effort: str('OPENROUTER_EFFORT', str('OPEN_ROUTER_EFFORT', '')),
+    vision: bool('OPENROUTER_VISION', bool('OPEN_ROUTER_VISION', true)),
+  },
   azure: {
     kind: 'azure',
     apiKey: str('AZURE_OPENAI_API_KEY'),
@@ -137,7 +147,7 @@ export function providerForRole(role) {
   return { name, ...p };
 }
 
-const KEY_VAR = { claude: 'ANTHROPIC_API_KEY', glm: 'GLM_API_KEY', azure: 'AZURE_OPENAI_API_KEY', openai: 'OPENAI_API_KEY', gemini: 'GEMINI_API_KEY' };
+const KEY_VAR = { claude: 'ANTHROPIC_API_KEY', glm: 'GLM_API_KEY', openrouter: 'OPENROUTER_API_KEY', azure: 'AZURE_OPENAI_API_KEY', openai: 'OPENAI_API_KEY', gemini: 'GEMINI_API_KEY' };
 
 // --provider on the CLI: every role, this run only.
 export function useProvider(name, roles = Object.keys(config.roles)) {

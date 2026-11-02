@@ -1774,7 +1774,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       // Model & Provider selection from frontend
-      const validProviders = ['azure', 'glm', 'claude', 'openai', 'gemini'];
+      const validProviders = ['azure', 'glm', 'claude', 'openai', 'gemini', 'openrouter'];
       let provider = validProviders.includes(body.provider) ? body.provider : (config.roles.builder || 'azure');
       let model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : (config.providers[provider]?.model || 'qwen--qwen38-27b');
       const validEfforts = ['low', 'medium', 'high', 'xhigh', 'max'];

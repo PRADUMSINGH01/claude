@@ -56,7 +56,7 @@ await step('system-prompt skill maps carry no content', () => {
 await step('providers: one switch for all roles, per-role override, gemini-safe tool schemas', async () => {
   const { useProvider, providerStatus, PROVIDER_NAMES } = await import('../src/config.js');
   const { geminiSchema } = await import('../src/llm.js');
-  assert.deepEqual(PROVIDER_NAMES.sort(), ['azure', 'claude', 'gemini', 'glm', 'openai']);
+  assert.deepEqual(PROVIDER_NAMES.sort(), ['azure', 'claude', 'gemini', 'glm', 'openai', 'openrouter']);
   const saved = { ...config.roles };
   useProvider('gemini');
   assert.ok(Object.values(config.roles).every((r) => r === 'gemini'));

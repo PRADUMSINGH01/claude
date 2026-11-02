@@ -23,8 +23,8 @@ function client(p) {
       apiKey: p.apiKey,
       baseURL: p.baseURL,
       fetch: longFetch,
-      // Azure's v1 endpoint authenticates with api-key; harmless elsewhere.
-      defaultHeaders: p.kind === 'azure' ? { 'api-key': p.apiKey } : undefined,
+      // Azure's v1 endpoint authenticates with api-key; OpenRouter shows the app name in its activity log.
+      defaultHeaders: p.kind === 'azure' ? { 'api-key': p.apiKey } : p.kind === 'openrouter' ? { 'X-Title': 'Byreel Motion Studio' } : undefined,
       maxRetries: 0,
       timeout: config.requestTimeoutSec * 1000,
     }));
@@ -34,8 +34,9 @@ function client(p) {
 
 export function requestBody(p, messages, tools, toolChoice, maxOut = config.maxOutputTokens, json = false) {
   const body = { model: p.model, messages };
-  // OpenAI and Azure can guarantee a valid JSON object; a malformed reply otherwise costs a repair call or the job.
-  if (json && (p.kind === 'openai' || p.kind === 'azure')) body.response_format = { type: 'json_object' };
+  // OpenAI, Azure and OpenRouter can guarantee a valid JSON object; a malformed reply otherwise costs a repair
+  // call or the job.
+  if (json && ['openai', 'azure', 'openrouter'].includes(p.kind)) body.response_format = { type: 'json_object' };
   if (tools?.length) {
     body.tools = p.kind === 'gemini' ? tools.map((t) => ({ ...t, function: { ...t.function, parameters: geminiSchema(t.function.parameters) } })) : tools;
     body.tool_choice = toolChoice ?? 'auto';
@@ -50,6 +51,10 @@ export function requestBody(p, messages, tools, toolChoice, maxOut = config.maxO
     body.max_tokens = maxOut;
   }
   if (p.kind === 'gemini' && p.effort) body.reasoning_effort = p.effort === 'minimal' ? 'low' : p.effort;
+  // OpenRouter's unified reasoning setting: low, medium or high ("xhigh"/"max" ask for its highest).
+  if (p.kind === 'openrouter' && p.effort) {
+    body.reasoning = p.effort === 'none' ? { enabled: false } : { effort: { minimal: 'low', xhigh: 'high', max: 'high' }[p.effort] ?? p.effort };
+  }
   // GLM's thinking is only on or off. Low effort turns it off: thinking can spend a whole 16k–32k output
   // budget before a single line of a scene file is written (seen in real runs).
   if (p.kind === 'glm' && p.effort) body.thinking = { type: ['none', 'minimal', 'low'].includes(p.effort) ? 'disabled' : 'enabled' };

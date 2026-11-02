@@ -122,6 +122,9 @@ export const config = {
   renderTimeoutSec: int('RENDER_TIMEOUT_SEC', 1800),
   jobDiskMb: int('JOB_DISK_MB', 4096),
   renderQuality: str('RENDER_QUALITY', 'looks'), // draft | looks | delivery
+  // The render host has a GPU. Without one, plans skip WebGPU-only registry items and a render that still
+  // needs WebGPU runs it in software (slow, but it finishes).
+  renderGpu: bool('RENDER_GPU', false),
   allowNetworkMedia: bool('ALLOW_NETWORK_MEDIA', true),
   heygen: bool('HEYGEN_ENABLED', Boolean(process.env.HEYGEN_API_BASE)),
   // Provider to use for a turn the main provider's content filter keeps blocking (optional).

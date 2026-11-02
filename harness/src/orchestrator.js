@@ -5,7 +5,7 @@ import path from 'node:path';
 import { config, providerForRole } from './config.js';
 import { OutOfTurnsError, runAgent } from './agent.js';
 import { hf, hfJson, quote } from './hf.js';
-import { clip, ensureBrowser, run } from './sandbox.js';
+import { clip, ensureBrowser, run, sandboxEnv } from './sandbox.js';
 import { SkillLibrary } from './skills/library.js';
 import { Workspace } from './workspace.js';
 import { Transcript } from './transcript.js';
@@ -289,12 +289,25 @@ export async function installRegistryItems(ws, plan, emit) {
   return lines.join('\n\n');
 }
 
+// A composition that declares data-requires-webgpu (a WebGPU shader block, or a scene adapted from one).
+export function requiresWebgpu(projectDir) {
+  const files = fs.readdirSync(projectDir, { recursive: true }).filter((f) => /\.html$/.test(f) && !/node_modules|renders/.test(f));
+  return files.some((f) => fs.readFileSync(path.join(projectDir, f), 'utf8').includes('data-requires-webgpu'));
+}
+
 export async function renderFinal(ws, emit) {
   const out = 'renders/final.mp4';
   fs.mkdirSync(path.join(ws.projectDir, 'renders'), { recursive: true });
   ws.chownAgentDirs();
   emit('render_start', { quality: config.renderQuality });
-  const res = await hf(ws, ['render', '--quality', config.renderQuality, '--output', out], { timeoutSec: config.renderTimeoutSec });
+  // No GPU here: a WebGPU scene renders in software instead of failing the whole film (a real render stopped
+  // at "a usable WebGPU device could not be created").
+  const softwareGpu = !config.renderGpu && requiresWebgpu(ws.projectDir);
+  if (softwareGpu) emit('warning', { message: 'a scene needs WebGPU and this host has no GPU: rendering it in software (slower)' });
+  const res = await hf(ws, ['render', '--quality', config.renderQuality, '--output', out], {
+    timeoutSec: config.renderTimeoutSec,
+    ...(softwareGpu ? { env: sandboxEnv(ws, { PRODUCER_ALLOW_SOFTWARE_WEBGPU: 'true' }) } : {}),
+  });
   const file = path.join(ws.projectDir, out);
   const ok = res.code === 0 && fs.existsSync(file) && fs.statSync(file).size > 1000;
   fs.writeFileSync(ws.meta('render.log'), res.output);

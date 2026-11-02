@@ -602,6 +602,21 @@ await step('a beat the brief gives footage must get media in the plan', async ()
   }
 });
 
+await step('a composition that needs WebGPU is found, so a GPU-less host renders it in software', async () => {
+  const { requiresWebgpu } = await import('../src/orchestrator.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webgpu-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'compositions'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'index.html'), '<div id="root"></div>');
+    fs.writeFileSync(path.join(dir, 'compositions', 'title.html'), '<template><div></div></template>');
+    assert.equal(requiresWebgpu(dir), false);
+    fs.writeFileSync(path.join(dir, 'compositions', 'blob.html'), '<template><div data-requires-webgpu></div></template>');
+    assert.equal(requiresWebgpu(dir), true, 'a WebGPU block in compositions/');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 await step('registry items the request names can be adapted into a hand-built scene', async () => {
   const { planChecks, namedCandidates } = await import('../src/plan.js');
   // The names come from the request's own words (a corrupted \b once made this find nothing).

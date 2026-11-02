@@ -197,6 +197,27 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
     emit('media', { items: credits.map((m) => ({ id: m.scene, kind: m.kind, source: m.source, by: m.credit.name, file: m.file })), missing: wantMedia.filter((s) => !s.stock).map((s) => s.id) });
   }
 
+  // No GPU on this host: a WebGPU block can't render here (in software the capture stalls; a real film stopped
+  // at frame 60 of 450), so the writer rebuilds it with canvas 2D, CSS or SVG in the first pass.
+  if (!config.renderGpu) {
+    const gpuOnly = scenes.filter((s) => s.mode !== 'write' && fs.readFileSync(path.join(ws.projectDir, s.file), 'utf8').includes('data-requires-webgpu'));
+    for (const s of gpuOnly) {
+      s.escalatedFrom = s.item;
+      s.escalationReason = 'needs WebGPU, which this host lacks: rebuild the effect with canvas 2D, CSS or SVG';
+      delete s.scale;
+      s.mode = 'write';
+      s.file = `compositions/${s.id}.html`;
+      s.compositionId = s.id;
+      s.values = {};
+      report.scenes[s.id] = { ...report.scenes[s.id], mode: 'write', escalatedFrom: s.item, result: 'pending', why: s.escalationReason };
+      writeFallback(ws, s, ctx);
+    }
+    if (gpuOnly.length) {
+      rewriteIndex();
+      emit('escalate', { scenes: gpuOnly.map((s) => ({ id: s.id, from: s.escalatedFrom, why: s.escalationReason })) });
+    }
+  }
+
   step('write scenes');
   await writeAndVerify(scenes.filter((s) => s.mode === 'write'));
 

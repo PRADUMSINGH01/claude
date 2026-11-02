@@ -3,6 +3,7 @@
 // only; at most two repairs; a code fallback if it still fails. No tool loop, no shared history.
 import fs from 'node:fs';
 import path from 'node:path';
+import { config } from '../config.js';
 import { parseModelJson } from '../plan.js';
 import { requireSection } from '../tools/skill-tools.js';
 import { fallbackScene, mediaMarkup, skeleton } from './scene-files.js';
@@ -126,6 +127,7 @@ export function staticProblems(html, id, duration, copy = [], mediaFile = null) 
   if (!html.includes(`__timelines["${id}"]`)) p.push(`register the timeline: window.__timelines["${id}"] = tl`);
   if (/Date\.now|Math\.random|fetch\(|setTimeout|setInterval|repeat:\s*-1/.test(html)) p.push('no Date.now, Math.random, fetch, timers or repeat:-1');
   if (/<link[^>]+href=|<script[^>]+src=/.test(html)) p.push('no external files (link/script src); gsap is already loaded');
+  if (!config.renderGpu && /data-requires-webgpu|navigator\.gpu/.test(html)) p.push('this host has no GPU: build the effect with canvas 2D, CSS or SVG, without WebGPU or data-requires-webgpu');
   for (const m of html.matchAll(/data-start="([\d.]+)"[^>]*data-duration="([\d.]+)"/g)) {
     if (Number(m[1]) + Number(m[2]) > duration + 0.05) { p.push(`a clip runs to ${Number(m[1]) + Number(m[2])}s, past the scene's ${duration}s`); break; }
   }

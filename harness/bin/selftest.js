@@ -662,6 +662,22 @@ await step('the sound shapes match the files (loudest moment re-measured with ff
   }
 });
 
+await step('without a GPU, a written scene that uses WebGPU is sent back to be rebuilt', async () => {
+  const { staticProblems } = await import('../src/build/scenes.js');
+  const { config } = await import('../src/config.js');
+  const scene = (body) => `<template><div id="root" data-composition-id="s" ${body}></div><script>window.__timelines["s"] = gsap.timeline({ paused: true });</script></template>`;
+  const saved = config.renderGpu;
+  try {
+    config.renderGpu = false;
+    assert.match(staticProblems(scene('data-requires-webgpu'), 's', 3).join(), /no GPU: build the effect with canvas 2D/);
+    assert.deepEqual(staticProblems(scene(''), 's', 3), []);
+    config.renderGpu = true;
+    assert.deepEqual(staticProblems(scene('data-requires-webgpu'), 's', 3), [], 'a host with a GPU keeps it');
+  } finally {
+    config.renderGpu = saved;
+  }
+});
+
 await step('a composition that needs WebGPU is found, so a GPU-less host renders it in software', async () => {
   const { requiresWebgpu } = await import('../src/orchestrator.js');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webgpu-'));

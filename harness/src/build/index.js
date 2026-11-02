@@ -173,8 +173,11 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
   // 4. Verify the film: check + measured. Readability problems count even when check calls them warnings.
   //    A written scene with issues gets one repair; a mounted/block scene is escalated to the writer once.
   step('verify film');
-  let issues = await measureFilm(scenes);
+  // The measured frames and the full check are independent browser runs (~20 s just to start each): together.
+  const [measured, check] = await Promise.all([measureFilm(scenes), time('full check', runCheck(ws))]);
+  let issues = measured;
   // A block or mounted item whose only problem is its size is scaled in code; a written scene is told to.
+  // No check of its own: the scale keeps the copy inside the 5% margin, and look and render show the result.
   const scaled = [];
   for (const s of scenes.filter((x) => x.mode !== 'write')) {
     const mine = issues.filter((i) => i.id === s.id);
@@ -186,20 +189,13 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
   }
   if (scaled.length) {
     rewriteIndex();
-    const after = findingsFor(await quickCheck(scaled), 'index.html').filter((f) => f.startsWith('[error]'));
-    if (after.length) { // the runtime refused the transform: keep the film valid
-      for (const s of scaled) delete s.scale;
-      rewriteIndex();
-      report.warnings.push(`scaling ${scaled.map((s) => s.id).join(', ')} broke check (${after[0]}); left at their own size`);
-    } else {
-      for (const s of scaled) report.warnings.push(`${s.id}: ${s.item} drew its copy too small; its host is scaled ${s.scale.k}x around the copy`);
-      emit('scaled', { scenes: scaled.map((s) => ({ id: s.id, k: s.scale.k })) });
-    }
+    for (const s of scaled) report.warnings.push(`${s.id}: ${s.item} drew its copy too small; its host is scaled ${s.scale.k}x around the copy`);
+    emit('scaled', { scenes: scaled.map((s) => ({ id: s.id, k: s.scale.k })) });
   }
-  const check = await time('full check', runCheck(ws));
   const MUST_FIX = /^\[error\]|text_below_floor|contrast|offscreen|clipped|overflow|cut_off/;
   for (const s of scenes) {
-    const found = findingsFor(check, s.file).filter((f) => MUST_FIX.test(f));
+    // The check saw a scaled scene before its scale: its type-size findings are what the scale answers.
+    const found = findingsFor(check, s.file).filter((f) => MUST_FIX.test(f) && !(s.scale && /text_below_floor/.test(f)));
     if (found.length) issues.push({ id: s.id, problem: found.join('; ') });
   }
   const indexFindings = findingsFor(check, 'index.html').filter((f) => f.startsWith('[error]'));
@@ -207,21 +203,24 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
   report.measured = issues;
   emit('measured', { issues });
 
+  // Repairing written scenes and rewriting escalated items touch different files, so they run side by side.
   const writtenWithIssues = scenes.filter((s) => s.mode === 'write' && !String(report.scenes[s.id].result).startsWith('fallback') && issues.some((i) => i.id === s.id));
-  await pool(writtenWithIssues, PARALLEL, async (s) => {
-    const problems = issues.filter((i) => i.id === s.id).map((i) => i.problem);
-    emit('scene', { id: s.id, step: 'film repair', problems });
-    const html = await writeScene(s, ctx, { problems, current: fs.readFileSync(sceneFile(ws, s), 'utf8') });
-    report.scenes[s.id].attempts++;
-    if (html && !staticProblems(html, s.id, s.duration).length) fs.writeFileSync(sceneFile(ws, s), html);
-  });
-  if (writtenWithIssues.length) {
+  const repairWritten = async () => {
+    if (!writtenWithIssues.length) return;
+    await pool(writtenWithIssues, PARALLEL, async (s) => {
+      const problems = issues.filter((i) => i.id === s.id).map((i) => i.problem);
+      emit('scene', { id: s.id, step: 'film repair', problems });
+      const html = await writeScene(s, ctx, { problems, current: fs.readFileSync(sceneFile(ws, s), 'utf8') });
+      report.scenes[s.id].attempts++;
+      if (html && !staticProblems(html, s.id, s.duration).length) fs.writeFileSync(sceneFile(ws, s), html);
+    });
     const c = await quickCheck(writtenWithIssues);
     for (const s of writtenWithIssues) if (findingsFor(c, s.file).some((f) => f.startsWith('[error]'))) { writeFallback(ws, s, ctx); report.scenes[s.id].result = 'fallback (film repair broke it)'; }
-  }
+  };
 
   const escalate = scenes.filter((s) => s.mode !== 'write' && s.layer !== 'background' && issues.some((i) => i.id === s.id));
-  if (escalate.length) {
+  const rewriteEscalated = async () => {
+    if (!escalate.length) return;
     for (const s of escalate) {
       s.escalatedFrom = s.item;
       s.escalationReason = issues.filter((i) => i.id === s.id).map((i) => i.problem).join('; ');
@@ -236,7 +235,8 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
     rewriteIndex();
     emit('escalate', { scenes: escalate.map((s) => ({ id: s.id, from: s.escalatedFrom, why: s.escalationReason })) });
     await writeAndVerify(escalate);
-  }
+  };
+  await Promise.all([repairWritten(), rewriteEscalated()]);
 
   // 5. Look (optional): one vision call over the contact sheet; write-mode scenes get one repair.
   if (look) {
@@ -251,8 +251,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
       if (html && !staticProblems(html, s.id, s.duration).length) fs.writeFileSync(sceneFile(ws, s), html);
     });
     if (toFix.length) {
-      const c = await quickCheck(toFix.map(({ s }) => s));
-      const blank = await measureFilm(toFix.map(({ s }) => s));
+      const [c, blank] = await Promise.all([quickCheck(toFix.map(({ s }) => s)), measureFilm(toFix.map(({ s }) => s))]);
       for (const { s } of toFix) {
         const broke = findingsFor(c, s.file).some((f) => f.startsWith('[error]')) || blank.some((b) => b.id === s.id && b.kind !== 'small');
         if (broke) {

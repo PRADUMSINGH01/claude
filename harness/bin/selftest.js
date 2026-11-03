@@ -715,7 +715,10 @@ await step('registry items the request names can be adapted into a hand-built sc
 });
 
 await step('a film is never longer than the length chosen in the app', async () => {
-  const { checkSettings, planChecks } = await import('../src/plan.js');
+  const { checkSettings, planChecks, withFormat } = await import('../src/plan.js');
+  // A plan or brief that leaves its format out gets it filled (a real run stopped on "runs undefined s").
+  assert.deepEqual(withFormat(undefined, { width: 1920, duration: 15 }), { width: 1920, duration: 15 });
+  assert.deepEqual(withFormat({ width: 1080, duration: null }, { width: 1920, duration: 15 }), { width: 1080, duration: 15 });
   const brief = (duration) => ({ format: { width: 1920, height: 1080, fps: 30, duration }, audio: 'sfx', beats: [] });
   // A free user picks 15 s and writes "make it 45 seconds": the brief must come back to 15.
   assert.match(checkSettings(brief(45), { aspect: '16:9', duration: 15 }).join(), /format.duration must be 15/);

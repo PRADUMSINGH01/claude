@@ -697,6 +697,13 @@ export function checkSettings(brief, options = {}) {
   return errs;
 }
 
+// A format with the fields a model left out taken from `fallback` (the brief's, or the app's settings), as ids
+// are filled in code. A real run stopped on "The plan runs undefined s" when the model omitted the format.
+export function withFormat(format, fallback = {}) {
+  const given = Object.fromEntries(Object.entries(format && typeof format === 'object' ? format : {}).filter(([, v]) => v != null));
+  return { ...fallback, ...given };
+}
+
 // A film never runs longer than the length chosen (and paid for) in the app, whatever the request text says.
 function assertPaidLength(format, options, what) {
   if (options.duration && !((format?.duration ?? Infinity) <= options.duration + 0.051)) {
@@ -733,6 +740,7 @@ export async function runPlan({ prompt, options = {}, onEvent = () => {}, jobsDi
     ws.writeJson('brief.raw.json', { raw: usage.lastRaw ?? null });
     throw new Error(`The model did not return a usable brief (raw reply saved to ${ws.meta('brief.raw.json')})`);
   }
+  brief.format = withFormat(brief.format, { ...(ASPECT[options.aspect] ? { width: ASPECT[options.aspect][0], height: ASPECT[options.aspect][1] } : {}), fps: 30, ...(options.duration ? { duration: options.duration } : {}) });
   assertPaidLength(brief.format, options, 'brief');
   ws.writeJson('brief.json', brief);
   onEvent({ type: 'brief', brief, errors: briefErrs });
@@ -789,6 +797,7 @@ export async function runPlan({ prompt, options = {}, onEvent = () => {}, jobsDi
     ws.writeJson('plan.raw.json', { raw: usage.lastRaw ?? null });
     throw new Error(`The model did not return a usable plan (raw reply saved to ${ws.meta('plan.raw.json')})`);
   }
+  plan.format = withFormat(plan.format, brief.format);
   assertPaidLength(plan.format, options, 'plan');
   ws.writeJson('plan.json', plan);
 

@@ -5,43 +5,50 @@
       "source": "heygen-com/hyperframes",
       "sourceType": "github",
       "skillPath": "skills/figma/SKILL.md",
-      "computedHash": "898884228cf905eedc1aac9d5d059f28c66c711ec4b950f627ec3d495c304da3"
+      "computedHash": "898884228cf905eedc1aac9d5d059f28c66c711ec4b950f627ec3d495c304da3",
+      "installMode": "copy"
     },
     "hyperframes": {
       "source": "heygen-com/hyperframes",
       "sourceType": "github",
       "skillPath": "skills/hyperframes/SKILL.md",
-      "computedHash": "126f3b0588ba564c4d5767d12357eebda38c006a375015eb4a563c23337ce6f9"
+      "computedHash": "1f66c33ae59c613d6c5cb483426ec8b80199ebea3861f1c71c74c62aaa295bc0",
+      "installMode": "copy"
     },
     "hyperframes-cli": {
       "source": "heygen-com/hyperframes",
       "sourceType": "github",
       "skillPath": "skills/hyperframes-cli/SKILL.md",
-      "computedHash": "3717d873cba9db11041f1b11e3e83d2bef78e513134f7d153fe487ca5bd65db8"
+      "computedHash": "f5431a7766e810fcf8f6883c9b8bc6195bdfc999e3258718abc3fd6d3d26f686",
+      "installMode": "copy"
     },
     "hyperframes-registry": {
       "source": "heygen-com/hyperframes",
       "sourceType": "github",
       "skillPath": "skills/hyperframes-registry/SKILL.md",
-      "computedHash": "73d399bf84e34d7868ff473c0b9f5971d52ed5aadb453384116207890b6750cd"
+      "computedHash": "0517125857b29759206962aecb85aa808fd267949233f20be37960a98974edfb",
+      "installMode": "copy"
     },
     "media-use": {
       "source": "heygen-com/hyperframes",
       "sourceType": "github",
       "skillPath": "skills/media-use/SKILL.md",
-      "computedHash": "269c7c7da824e004e6cf81069101808ba1f9ee0f2c655cd8bf86ecf42c7338c9"
+      "computedHash": "b30f9384c36da59afb91b63bea24a569c7c039c461b8fbfcee9d542c3e3a98be",
+      "installMode": "copy"
     },
     "remotion-to-hyperframes": {
       "source": "heygen-com/hyperframes",
       "sourceType": "github",
       "skillPath": "skills/remotion-to-hyperframes/SKILL.md",
-      "computedHash": "35f4cdb6e369a58bfb3683bc242a0391538c1e407fd933bbdf25b9c761253f08"
+      "computedHash": "dbbf69e923328768ad8fcddd5daad0f27e3edefc1894e5da970f931b204d5f33",
+      "installMode": "copy"
     },
     "slideshow": {
       "source": "heygen-com/hyperframes",
       "sourceType": "github",
       "skillPath": "skills/slideshow/SKILL.md",
-      "computedHash": "2cce5d13b634a742a25e62a1d78366ee97d0bf51a708eb4746e44a0579a3b6a7"
+      "computedHash": "2cce5d13b634a742a25e62a1d78366ee97d0bf51a708eb4746e44a0579a3b6a7",
+      "installMode": "copy"
     }
   }
 }

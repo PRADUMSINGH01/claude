@@ -15,7 +15,7 @@
     "selftest": "node --env-file-if-exists=../.env bin/selftest.js"
   },
   "dependencies": {
-    "hyperframes": "0.8.211",
+    "hyperframes": "0.9.8",
     "openai": "^7.45.1",
     "undici": "^8.12.3"
   }

@@ -46,11 +46,12 @@ The file must follow the contract below exactly:
 - One paused GSAP timeline, registered last: window.__timelines["<scene id>"] = tl. gsap is already loaded globally.
 - Every timed element has class="clip", data-start and data-duration in seconds relative to the scene start, inside the scene's duration. Animate children of a .clip (or its opacity), never display/visibility/autoAlpha. Use fromTo, never from.
 - No Date.now(), Math.random(), fetch, timers, or repeat: -1. Everything visible is a function of timeline time.
+- A scene makes no sound: no <audio>, no Web Audio. Sound the person asked for (a tick on each bar, a whoosh, a hit) is placed on the film's sound track from the plan; draw the moment it marks.
 - Ids unique and prefixed "<scene id>-".
 - Sizes relative to the box: #root has container-type: size, so use cqw/cqh/cqmin for type and spacing (the box size is in the task).
 - Colours and fonts only through the theme tokens: var(--bg) var(--fg) var(--accent) var(--accent-2) var(--font-display) var(--font-body). Never make text the ground colour.
 - On-screen text: exactly the scene's copy, verbatim, written as text in the HTML. No other words: remove a component's demo labels, counters and percentages. One exception: a product interface you draw (an editor, a dashboard, an invoice, a phone screen) may carry short generic interface labels so it reads as that product: field names, button words, column heads, currency codes (Invoice, Client, Due, Send, USD). Never invented names, claims or figures: an empty mock-up box reads as nothing.
-- A number that counts up (0 → 85%) is written in the HTML at its final value; the timeline's onUpdate rewrites it while it counts (seek-safe, from the timeline's progress).
+- A number that counts up (0 → 85%) is written in the HTML at its final value; the timeline's onUpdate rewrites it while it counts (seek-safe, from the timeline's progress). The number itself never overshoots (power ease, rounded); an elastic or bouncy feel goes on the bar or the label's scale, never on the value. Every figure on screen is one the scene's copy or the request gives.
 - Words split into separate elements keep their spaces: put them in a block or inline container, never a flex or grid row without a gap (flex drops the spaces, so "Roasted on" reads "Roastedon").
 - Components and adapted blocks: each <component> below is source to adapt, not to mount. Keep its technique (the typing, the shatter, the reveal) and rewrite its markup, CSS and script into this file's skeleton with the scene's copy, timing and theme tokens; none of its demo text survives. Don't load external files.
 
@@ -130,8 +131,17 @@ export const visibleText = (html) => String(html)
   .replace(/&(#?\w+);/g, (m, e) => ENTITIES[e] ?? m);
 const squash = (s) => String(s).toLowerCase().replace(/[’‘]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, '');
 
-export function staticProblems(html, id, duration, copy = [], mediaFile = null) {
+// The figures on screen (numbers in the visible text), each as written: "79%", "2,500", "4.5".
+export const figuresIn = (text) => String(text).match(/\d[\d,.]*%?/g)?.map((f) => f.replace(/[.,]$/, '')) ?? [];
+
+// figures: every figure the request and the film's copy give (a Set); null skips the check.
+export function staticProblems(html, id, duration, copy = [], mediaFile = null, figures = null) {
   const p = [];
+  // A real chart redrew itself under its source line with invented values (26%, 72%, ... 100%).
+  if (figures) {
+    const invented = [...new Set(figuresIn(visibleText(html)).filter((f) => !figures.has(f) && !figures.has(f.replace('%', ''))))];
+    if (invented.length) p.push(`the scene shows figures the request never gives (${invented.slice(0, 8).join(', ')}): show only the request's figures; a chart repeated for continuity shows the same values`);
+  }
   if (mediaFile && !html.includes(mediaFile)) p.push(`the scene's backdrop ${mediaFile} is missing: put it first inside #root as the MEDIA rule shows`);
   // Copy is the one thing that must be exact. A real run wrote "Mornin<span>g</span>" and kept the "s" only
   // in an aria-label, so the film said "Slow Morning".
@@ -147,8 +157,9 @@ export function staticProblems(html, id, duration, copy = [], mediaFile = null) 
   if (!html.includes(`__timelines["${id}"]`)) p.push(`register the timeline: window.__timelines["${id}"] = tl`);
   if (/Date\.now|Math\.random|fetch\(|setTimeout|setInterval|repeat:\s*-1/.test(html)) p.push('no Date.now, Math.random, fetch, timers or repeat:-1');
   if (/<link[^>]+href=|<script[^>]+src=/.test(html)) p.push('no external files (link/script src); gsap is already loaded');
-  // A real chart made its "tick sound on each bar" with Web Audio in its script: the renderer refused the film.
-  if (/AudioContext|new\s+Audio\s*\(|\.play\s*\(\s*\)/.test(html)) p.push('no Web Audio, new Audio() or play(): a scene makes no sound itself; its sound effects are placed on the film\'s sound track from the plan, so remove the audio code');
+  // A real chart made its "tick sound on each bar" with Web Audio in its script (the renderer refused the film),
+  // then with <audio> tags that had no file (check errors, so the chart fell back).
+  if (/AudioContext|new\s+Audio\s*\(|\.play\s*\(\s*\)|<audio[\s>]/i.test(html)) p.push('no <audio>, Web Audio, new Audio() or play(): a scene makes no sound itself; its sound effects are placed on the film\'s sound track from the plan, so remove all audio from this file');
   if (!config.renderGpu && needsGpu(html)) p.push('this host has no GPU: build the effect with CSS 3D transforms, canvas 2D or SVG, without WebGPU, three.js or data-requires-webgpu');
   for (const m of html.matchAll(/data-start="([\d.]+)"[^>]*data-duration="([\d.]+)"/g)) {
     if (Number(m[1]) + Number(m[2]) > duration + 0.05) { p.push(`a clip runs to ${Number(m[1]) + Number(m[2])}s, past the scene's ${duration}s`); break; }

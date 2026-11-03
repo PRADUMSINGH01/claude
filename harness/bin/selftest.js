@@ -578,7 +578,13 @@ await step('a scene must show its copy whole as visible text (not only in an att
   const lost = ok.replace('<span>Slow</span> <span>Mornings</span>', '<div aria-label="Slow Mornings">Slow&nbsp;Mornin<span>g</span></div>');
   assert.match(staticProblems(lost, 'a', 2, ['Slow Mornings']).join(), /"Slow Mornings" is not all in the markup \("Mornings" missing\)/);
   // A scene makes no sound itself (the renderer refuses Web Audio); its sound is the film's sound track.
-  assert.match(staticProblems('<template><div id="root" data-composition-id="a"><script>const ac = new AudioContext(); window.__timelines["a"]=tl</script></div></template>', 'a', 2, []).join(), /no Web Audio/);
+  assert.match(staticProblems('<template><div id="root" data-composition-id="a"><script>const ac = new AudioContext(); window.__timelines["a"]=tl</script></div></template>', 'a', 2, []).join(), /no <audio>, Web Audio/);
+  assert.match(staticProblems('<template><div id="root" data-composition-id="a"><audio id="a-tick" class="clip" data-start="0" data-duration="1"></audio><script>window.__timelines["a"]=tl</script></div></template>', 'a', 2, []).join(), /no <audio>, Web Audio/);
+  // Figures come from the request: a chart redrawn under its source line had invented every value.
+  const figs = new Set(['22%', '22', '85%', '85', '2019', '2024']);
+  const redrawn = '<template><div id="root" data-composition-id="a"><b>26%</b><b>100%</b><i>2019</i><script>window.__timelines["a"]=tl</script></div></template>';
+  assert.match(staticProblems(redrawn, 'a', 2, [], null, figs).join(), /figures the request never gives \(26%, 100%\)/);
+  assert.doesNotMatch(staticProblems(redrawn.replace('26%', '22%').replace('100%', '85%'), 'a', 2, [], null, figs).join(), /never gives/);
   // A chart's label and value sit apart (year under the bar, value above): every word present is enough.
   const chart = '<template><div id="root" data-composition-id="a"><div class="bar"><b>22%</b><i>2019</i></div><script>window.__timelines["a"]=tl</script></div></template>';
   assert.doesNotMatch(staticProblems(chart, 'a', 2, ['2019 22%']).join(), /is not all in the markup/);

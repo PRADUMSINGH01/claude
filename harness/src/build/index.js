@@ -15,7 +15,7 @@ import { runCheck } from '../tools/project-tools.js';
 import { layerEvidence, renderFinal, verifyOutput } from '../orchestrator.js';
 import { assemble, indexHtml } from './assemble.js';
 import { creditsMarkdown, getStock } from '../media/stock.js';
-import { findingsFor, needsGpu, sceneFile, staticProblems, writeFallback, writeScene } from './scenes.js';
+import { figuresIn, findingsFor, needsGpu, sceneFile, staticProblems, writeFallback, writeScene } from './scenes.js';
 
 const MAX_REPAIRS = 2;
 // Scene writes are network-bound: run several at once (BUILD_PARALLEL), as a pool so one slow scene never
@@ -113,7 +113,9 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
   report.warnings.push(...asm.warnings);
   // Every scene writer also gets what the request rules out, and the guide for this kind of film.
   const request = ws.readJson('request.json', {});
-  const ctx = { format: plan.format, roles: asm.roles, lib, items: asm.items, ask, hasBackground: plan.scenes.some((s) => s.layer === 'background'), avoid: brief?.avoid ?? [], filmGuide: filmGuide(lib, brief, request.prompt ?? '') };
+  // Every figure the film may show: the request's and its copy's (staticProblems flags any other).
+  const figures = new Set(figuresIn(`${request.prompt ?? ''} ${(plan.scenes ?? []).flatMap((s) => s.text ?? []).join(' ')}`).flatMap((f) => [f, f.replace('%', '')]));
+  const ctx = { format: plan.format, roles: asm.roles, lib, items: asm.items, ask, hasBackground: plan.scenes.some((s) => s.layer === 'background'), avoid: brief?.avoid ?? [], figures, filmGuide: filmGuide(lib, brief, request.prompt ?? '') };
   const scenes = asm.scenes;
   plan.__ground = asm.roles.ground;
   for (const s of scenes) report.scenes[s.id] = { mode: s.mode, item: s.item, attempts: 0, result: s.mode === 'write' ? 'pending' : 'assembled' };
@@ -153,12 +155,12 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
         html = await writeScene(s, ctx, { effort: ['openrouter', 'glm'].includes(provider.kind) ? 'none' : provider.kind === 'gemini' ? 'low' : 'minimal' });
         report.scenes[s.id].attempts++;
       }
-      let problems = html ? staticProblems(html, s.id, s.duration, s.text, s.stock?.file) : ['no html in the reply'];
+      let problems = html ? staticProblems(html, s.id, s.duration, s.text, s.stock?.file, ctx.figures) : ['no html in the reply'];
       if (problems.length && html) {
         emit('scene', { id: s.id, step: 'repair', problems });
         html = (await writeScene(s, ctx, { problems, current: html })) ?? html;
         report.scenes[s.id].attempts++;
-        problems = staticProblems(html, s.id, s.duration, s.text, s.stock?.file);
+        problems = staticProblems(html, s.id, s.duration, s.text, s.stock?.file, ctx.figures);
       }
       if (html && !problems.length) fs.writeFileSync(sceneFile(ws, s), html);
       else { writeFallback(ws, s, ctx); report.scenes[s.id].result = 'fallback (contract)'; report.scenes[s.id].why = problems; }
@@ -175,7 +177,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
         emit('scene', { id: s.id, step: `repair ${round}`, problems });
         const html = await writeScene(s, ctx, { problems, current: fs.readFileSync(sceneFile(ws, s), 'utf8') });
         report.scenes[s.id].attempts++;
-        if (html && !staticProblems(html, s.id, s.duration, s.text, s.stock?.file).length) fs.writeFileSync(sceneFile(ws, s), html);
+        if (html && !staticProblems(html, s.id, s.duration, s.text, s.stock?.file, ctx.figures).length) fs.writeFileSync(sceneFile(ws, s), html);
       });
       check = null; // the files changed since: check again
     }
@@ -287,7 +289,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
       emit('scene', { id: s.id, step: 'film repair', problems });
       const html = await writeScene(s, ctx, { problems, current: fs.readFileSync(sceneFile(ws, s), 'utf8') });
       report.scenes[s.id].attempts++;
-      if (html && !staticProblems(html, s.id, s.duration, s.text, s.stock?.file).length) fs.writeFileSync(sceneFile(ws, s), html);
+      if (html && !staticProblems(html, s.id, s.duration, s.text, s.stock?.file, ctx.figures).length) fs.writeFileSync(sceneFile(ws, s), html);
     });
     const c = await quickCheck(writtenWithIssues);
     for (const s of writtenWithIssues) if (findingsFor(c, s.file).some((f) => f.startsWith('[error]'))) { writeFallback(ws, s, ctx); report.scenes[s.id].result = 'fallback (film repair broke it)'; }
@@ -325,7 +327,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
       before.set(s.id, fs.readFileSync(sceneFile(ws, s), 'utf8'));
       const html = await writeScene(s, ctx, { problems: [`${i.problem} → ${i.fix}`], current: before.get(s.id) });
       report.scenes[s.id].attempts++;
-      if (html && !staticProblems(html, s.id, s.duration, s.text, s.stock?.file).length) fs.writeFileSync(sceneFile(ws, s), html);
+      if (html && !staticProblems(html, s.id, s.duration, s.text, s.stock?.file, ctx.figures).length) fs.writeFileSync(sceneFile(ws, s), html);
     });
     if (toFix.length) {
       // A repair that leaves a measured problem the scene did not have before is undone (made it small, blank, cut).

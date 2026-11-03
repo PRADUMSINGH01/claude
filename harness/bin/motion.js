@@ -42,6 +42,7 @@ const [cmd, ...rest] = positionals;
 const USAGE = `motion run "<prompt>" [--theme <preset>] [--aspect 16:9|9:16|1:1] [--duration <s>] [--no-look] [--no-render] [--json]
                                  plan + build (as on the server); --agents runs the older agent loops instead
 motion resume <job-dir> [--json] continues a job with the pipeline it started with
+motion edit <job-dir> "<change>" a new job that edits a finished film: unchanged scenes kept, changed ones rewritten
 motion plan "<prompt>"           plan only (no video): brief → story → shortlist → plan → rating
 motion build <plan-job-dir>      build an approved plan: assemble → write scenes → verify → render  [--look] [--no-render] [--max-tokens N]
 motion providers                 which AI providers have keys, their models, which role uses which
@@ -191,6 +192,13 @@ try {
     for (const t of listThemes()) console.log(`${t.name.padEnd(18)} ${t.fonts.join(' + ')}  ${Object.values(t.colors).slice(0, 5).join(' ')}`);
   } else if (cmd === 'skills') {
     console.log(skillMap(rest[0] ?? 'builder', new SkillLibrary(config.skillsDir)));
+  } else if (cmd === 'edit') {
+    // motion edit <finished-job-dir> "<what to change>": a new job that edits that film.
+    const { runEdit } = await import('../src/edit.js');
+    const ac = new AbortController();
+    process.on('SIGINT', () => ac.abort());
+    const result = await runEdit({ base: rest[0], prompt: rest.slice(1).join(' '), jobsDir: values.jobs, signal: ac.signal, onEvent: printFilmEvent, look: !values['no-look'] && process.env.BUILD_LOOK !== 'false' });
+    console.log(`\nVideo: ${result.video}`);
   } else if (cmd === 'run' || cmd === 'resume') {
     const options = {};
     if (values.theme) options.theme = values.theme;

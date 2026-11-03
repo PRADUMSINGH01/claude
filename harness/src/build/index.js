@@ -5,8 +5,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { config, providerForRole } from '../config.js';
-import { imageMessage, chat } from '../llm.js';
-import { ask as askJson, parseModelJson } from '../plan.js';
+import { addUsage, imageMessage, chat } from '../llm.js';
+import { ask as askJson, filmGuide, parseModelJson } from '../plan.js';
 import { SkillLibrary } from '../skills/library.js';
 import { Workspace } from '../workspace.js';
 import { ensureBrowser, run } from '../sandbox.js';
@@ -34,27 +34,30 @@ async function pool(list, n, fn) {
   return out;
 }
 
-export async function runBuild(dir, { onEvent = () => {}, look = false, render = true, maxTokens = Number(process.env.BUILD_MAX_TOKENS ?? 300_000), signal } = {}) {
+// edit: building an edit of a finished film: { base: the finished project dir, keep: scene ids whose files stay as
+// they were, changes: { sceneId: what to change } } (see edit.js).
+export async function runBuild(dir, { onEvent = () => {}, look = false, render = true, maxTokens = Number(process.env.BUILD_MAX_TOKENS ?? 300_000), signal, edit = null } = {}) {
   const ws = Workspace.open(dir);
   const plan = ws.readJson('plan.json');
   const brief = ws.readJson('brief.json');
   if (!Array.isArray(plan?.scenes)) throw new Error(`No plan.json with scenes in ${dir}`);
   const provider = providerForRole('builder');
   const lib = new SkillLibrary(config.skillsDir);
-  const usage = { input: 0, output: 0, calls: 0 };
+  const usage = { input: 0, output: 0, cachedInput: 0, calls: 0, pricedCalls: 0, cost: 0 };
   const report = { job: ws.id, provider: `${provider.name}/${provider.model}`, started: new Date().toISOString(), scenes: {}, warnings: [], measured: [], look: null, render: null };
   const emit = (type, data = {}) => onEvent({ type, ...data });
   const t0 = Date.now();
 
   // Every model call goes through here: token cap, the reply parsed to its shape (JSON unless parse says
   // otherwise), usage, and the calls/ archive.
-  const ask = async (system, user, { label, parse }) => {
+  // effort: this call only, at another reasoning effort (a retry that must answer rather than think).
+  const ask = async (system, user, { label, parse, effort }) => {
     if (usage.input + usage.output >= maxTokens) {
       emit('cap', { label, used: usage.input + usage.output, maxTokens });
       return null;
     }
     const [inBefore, outBefore] = [usage.input, usage.output];
-    const out = await askJson(provider, system, user, usage, { signal, parse, label, log: (call) => ws.logCall(call) }).catch((err) => {
+    const out = await askJson(effort ? { ...provider, effort } : provider, system, user, usage, { signal, parse, label, log: (call) => ws.logCall(call) }).catch((err) => {
       if (signal?.aborted) throw err;
       // No credits, a bad key, no access: every later call fails the same way, and a film of placeholder
       // scenes is worse than a clear stop.
@@ -108,7 +111,9 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
   step('assemble');
   const asm = await assemble(ws, plan, brief, { emit: (_t, d) => emit('assemble', d) });
   report.warnings.push(...asm.warnings);
-  const ctx = { format: plan.format, roles: asm.roles, lib, items: asm.items, ask, hasBackground: plan.scenes.some((s) => s.layer === 'background') };
+  // Every scene writer also gets what the request rules out, and the guide for this kind of film.
+  const request = ws.readJson('request.json', {});
+  const ctx = { format: plan.format, roles: asm.roles, lib, items: asm.items, ask, hasBackground: plan.scenes.some((s) => s.layer === 'background'), avoid: brief?.avoid ?? [], filmGuide: filmGuide(lib, brief, request.prompt ?? '') };
   const scenes = asm.scenes;
   plan.__ground = asm.roles.ground;
   for (const s of scenes) report.scenes[s.id] = { mode: s.mode, item: s.item, attempts: 0, result: s.mode === 'write' ? 'pending' : 'assembled' };
@@ -127,16 +132,25 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
   const rewriteIndex = () => fs.writeFileSync(path.join(ws.projectDir, 'index.html'), indexHtml(plan, scenes, asm.roles, fontCss, themeColors, asm.sfx));
   report.sfx = asm.sfx;
 
+  // The file a scene had in the film being edited, or null.
+  const baseFile = (s) => {
+    const f = edit?.base && path.join(edit.base, s.file);
+    return f && fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : null;
+  };
+
   // 2–3. Write and verify the scenes the model has to write.
   const writeAndVerify = async (targets) => {
     // First drafts, in parallel; code checks get one immediate fix.
     await pool(targets, PARALLEL, async (s) => {
-      emit('scene', { id: s.id, step: 'write' });
-      let html = await writeScene(s, ctx);
+      const before = edit?.changes?.[s.id] ? baseFile(s) : null;
+      emit('scene', { id: s.id, step: before ? 'edit' : 'write' });
+      let html = before ? await writeScene(s, ctx, { change: `${edit.request}\nIn this scene: ${edit.changes[s.id]}`, current: before }) : await writeScene(s, ctx);
       report.scenes[s.id].attempts++;
-      if (!html) { // nothing usable came back (cut off, refused, no file in it): one fresh try before a fallback
+      if (!html) { // nothing usable came back (cut off, refused, no file in it): one fresh try before a fallback,
+        // with reasoning off: real DeepSeek runs, even at low effort, thought ~29k tokens and were cut off before the
+        // file (or a few lines into it), twice. Each provider's lowest setting ("none" is rejected by GPT-5 Mini).
         emit('scene', { id: s.id, step: 'write again', problems: ['no scene file in the reply'] });
-        html = await writeScene(s, ctx);
+        html = await writeScene(s, ctx, { effort: ['openrouter', 'glm'].includes(provider.kind) ? 'none' : provider.kind === 'gemini' ? 'low' : 'minimal' });
         report.scenes[s.id].attempts++;
       }
       let problems = html ? staticProblems(html, s.id, s.duration, s.text, s.stock?.file) : ['no html in the reply'];
@@ -219,8 +233,17 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
     }
   }
 
+  // An edit keeps the scenes the change leaves alone exactly as they were.
+  if (edit) {
+    for (const s of scenes.filter((x) => x.mode === 'write' && edit.keep?.includes(x.id) && baseFile(x) != null)) {
+      fs.writeFileSync(sceneFile(ws, s), baseFile(s));
+      report.scenes[s.id].result = 'kept';
+    }
+    emit('edit', { kept: scenes.filter((s) => report.scenes[s.id].result === 'kept').map((s) => s.id), changed: Object.keys(edit.changes ?? {}) });
+  }
+
   step('write scenes');
-  await writeAndVerify(scenes.filter((s) => s.mode === 'write'));
+  await writeAndVerify(scenes.filter((s) => s.mode === 'write' && report.scenes[s.id].result === 'pending'));
 
   // 4. Verify the film: check + measured. Readability problems count even when check calls them warnings.
   //    A written scene with issues gets one repair; a mounted/block scene is escalated to the writer once.
@@ -319,6 +342,15 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
     }
   }
 
+  // A scene that ended as the code placeholder is said out loud: the film is not what was asked there.
+  const fellBack = scenes.filter((s) => String(report.scenes[s.id]?.result ?? '').startsWith('fallback'));
+  if (fellBack.length) {
+    emit('warning', {
+      userFacing: true,
+      message: `${fellBack.length === 1 ? 'One scene' : `${fellBack.length} scenes`} (${fellBack.map((s) => s.id).join(', ')}) could not be built as described and ${fellBack.length === 1 ? 'shows' : 'show'} a simple version. Send the prompt again to rebuild it.`,
+    });
+  }
+
   // 6. Render + verify.
   if (render) {
     step('render');
@@ -331,7 +363,7 @@ export async function runBuild(dir, { onEvent = () => {}, look = false, render =
   ws.writeJson('build-report.json', report);
   fs.writeFileSync(ws.meta('build-report.md'), reportMarkdown(report, plan));
   const prev = ws.readJson('usage.json', {});
-  ws.writeJson('usage.json', { ...prev, builder: { input: usage.input, output: usage.output, turns: usage.calls, runs: 1 } });
+  ws.writeJson('usage.json', { ...prev, builder: { input: usage.input, output: usage.output, cachedInput: usage.cachedInput, calls: usage.calls, pricedCalls: usage.pricedCalls, cost: usage.cost, turns: usage.calls, runs: 1 } });
   emit('done', { report: ws.meta('build-report.md'), video: report.render?.ok ? path.join(ws.projectDir, 'renders', 'final.mp4') : null, usage: report.usage, timings: report.timings });
   return report;
 }
@@ -494,7 +526,7 @@ async function lumaSpread(ws, file, scene) {
   return Number.isFinite(min) && Number.isFinite(max) ? max - min : null;
 }
 
-const LOOK_SYSTEM = `You review frames of a short video against its plan. The contact sheet shows frames from each scene. For each scene, report only real visible defects: text too small to read or cut off, text overlapping, wrong colours for the plan, empty or broken frames, demo/placeholder content, layout far from the plan. Reply with JSON only: {"issues":[{"scene":"<scene id>","problem":"what is visibly wrong","fix":"one concrete instruction"}]} — an empty list if it looks right.`;
+const LOOK_SYSTEM = `You review frames of a short video against its plan. The contact sheet shows frames from each scene. For each scene, report only real visible defects: text too small to read or cut off, text overlapping, wrong colours for the plan, empty or broken frames, demo/placeholder content, layout far from the plan, and any of the scene's asks a still frame should show that is missing (a fog, a light from behind, a texture, a colour, an object). Motion asks (shake, jitter, a scare) cannot be judged from one frame: skip those. Not defects (a real run's repairs for these broke the scene): copy shown in capitals by a capitals-only typeface or a CSS text-transform; a text colour lighter or darker than a hex named in build, since the text colour is chosen to read on the ground. Reply with JSON only: {"issues":[{"scene":"<scene id>","problem":"what is visibly wrong","fix":"one concrete instruction"}]} — an empty list if it looks right.`;
 
 function lookProvider() {
   try {
@@ -515,12 +547,10 @@ async function lookAtFilm(ws, plan, scenes, provider, usage, maxTokens, emit, ti
   const sheet = res.json?.contactSheets?.[0];
   if (!sheet) return { skipped: 'no contact sheet' };
   const img = await imageMessage(provider, 'Contact sheet, frames in scene order:', [sheet]);
-  const planText = JSON.stringify(shown.map((s) => ({ scene: s.id, at: lookTime(s), copy: s.text, build: s.build })), null, 1);
+  const planText = JSON.stringify(shown.map((s) => ({ scene: s.id, at: lookTime(s), copy: s.text, asks: s.must ?? [], build: s.build })), null, 1);
   const started = Date.now();
   const { message, finish, usage: u } = await chat(provider, [{ role: 'system', content: LOOK_SYSTEM }, { role: 'user', content: planText }, img].filter(Boolean), null, { json: true });
-  usage.input += u.input;
-  usage.output += u.output;
-  usage.calls += 1;
+  addUsage(usage, u);
   ws.logCall({ label: 'look', provider: `${provider.name}/${provider.model}`, at: new Date(started).toISOString(), seconds: +((Date.now() - started) / 1000).toFixed(1), finish, usage: u, system: LOOK_SYSTEM, user: planText, image: sheet, reply: message.content ?? '' });
   const out = parseModelJson(message.content ?? '') ?? { issues: [] };
   emit('look', { issues: out.issues ?? [] });

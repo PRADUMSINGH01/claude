@@ -2,7 +2,7 @@
 // No tool loops and nothing re-sent: a few short model calls (plus one repair per step if invalid).
 import fs from 'node:fs';
 import { config, providerForRole } from './config.js';
-import { chat } from './llm.js';
+import { addUsage, chat } from './llm.js';
 import { SkillLibrary } from './skills/library.js';
 import { requireSection } from './tools/skill-tools.js';
 import { catalogSearch, inspectItem, listThemes, registryHas } from './tools/registry-tools.js';
@@ -43,7 +43,7 @@ ${BRIEF_SHAPE}
 Rules:
 - copy holds only the words that appear on screen, verbatim (same words, punctuation and case). Never invent copy the request did not give, except a title card when there is no copy at all (say so in assumptions).
 - Instructions are not copy. "show the source on screen" means the source itself goes in copy (e.g. "Source: UN World Population Prospects 2024"), never the words "show … on screen".
-- Beats are back to back from 0 and end at format.duration. Use the request's timings when given. Otherwise give every beat time to be read: at least 2 s, and 1 s + 0.3 s per word of its copy.
+- Beats are back to back from 0 and end at format.duration. Use the request's timings when given. Otherwise give every beat time to be read: at least 2 s, and 1 s + 0.3 s per word of its copy. A film shorter than that is one beat that fills the whole film.
 - One sentence or line of copy lives in ONE beat, whole. Never split it into fragments across beats; a word-by-word or line-by-line reveal is one beat (its intent says "word by word reveal"). Never repeat copy in a later beat: a hold is part of the same beat, so make that beat longer.
 - transitions: one per seam between beats when the request asks for transitions (else []). "at" is exactly the seam (a beat's end). kind "cover" = an overlay that covers the whole frame at its midpoint and hides the cut (colour flood, block/slice wipe, iris); kind "handoff" = the outgoing beat leaves and the next arrives with matching motion (whip, blur swap, push). Vary the styles; duration 0.3–1.2 s. Plain crossfades only if asked.
 - overlays: only text the request keeps on screen WHILE other beats play (e.g. "keep the logo in the corner", "the source stays at the bottom", "the hook stays at the top"). Give it its time range and position. Text shown in sequence ("then…") is a beat, not an overlay. Usually overlays is [].
@@ -56,9 +56,10 @@ ${FOOTAGE_RULE}`;
 
 const INSTRUCTION_WORDS = /\b(show|display|on[- ]screen|use only|make sure|should|add a|include)\b/i;
 const LAYER_WORDS = /(animat|shader|aurora|gradient|texture|pattern|particle|noise|footage|moving|alive|living|evolving|loop|grid)/i;
-export const readFloor = (copy) => {
+// Seconds a beat needs to be read, never more than the film itself has (a 1-second title can't hold 2 s).
+export const readFloor = (copy, cap = Infinity) => {
   const words = copy.join(' ').trim().split(/\s+/).filter(Boolean).length;
-  return words ? Math.max(2, 1 + 0.3 * words) : 0;
+  return words ? Math.min(cap, Math.max(2, 1 + 0.3 * words)) : 0;
 };
 
 // Ids are bookkeeping, not judgement: code fills the ones a model leaves out or garbles (beat-2, t-1…), so a
@@ -108,7 +109,7 @@ export function checkBrief(brief, prompt, options = {}) {
   for (const o of brief.overlays ?? []) {
     if (!(o.start >= 0 && o.end <= (brief.format?.duration ?? Infinity) + 0.051 && o.end > o.start)) errs.push(`overlay ${o.id} must sit inside 0–${brief.format?.duration}s`);
     for (const c of o.copy ?? []) if (INSTRUCTION_WORDS.test(c)) errs.push(`overlay ${o.id} copy "${c}" reads like an instruction, not on-screen text`);
-    const floor = readFloor(o.copy ?? []);
+    const floor = readFloor(o.copy ?? [], brief.format?.duration);
     if (floor && o.end - o.start < floor - 0.01) errs.push(`overlay ${o.id} is too short to read (needs ${floor.toFixed(1)}s)`);
   }
   const seams = (brief.beats ?? []).slice(0, -1).map((b) => b.end);
@@ -144,7 +145,7 @@ export function checkBrief(brief, prompt, options = {}) {
   for (const f of brief.look?.fonts ?? []) if (GENERATED_FONTS.some((g) => g.toLowerCase() === String(f).toLowerCase()) && !asked(f)) errs.push(`font "${f}" is a generated-video default the request did not ask for; pick a family from the subject's world`);
   for (const b of brief.beats ?? []) {
     for (const c of b.copy ?? []) if (INSTRUCTION_WORDS.test(c)) errs.push(`beat ${b.id} copy "${c}" reads like an instruction, not on-screen text; put only the words the viewer sees`);
-    const floor = readFloor(b.copy ?? []);
+    const floor = readFloor(b.copy ?? [], brief.format?.duration);
     if (floor && b.end - b.start < floor - 0.01) errs.push(`beat ${b.id} is ${+(b.end - b.start).toFixed(2)}s but its copy needs ${floor.toFixed(1)}s to be read; lengthen it (take time from other beats) or merge it`);
   }
   if (brief.background?.wanted && !LAYER_WORDS.test(prompt)) {
@@ -353,6 +354,7 @@ const PLAN_SHAPE = `{
     "purpose": "what the viewer takes from it", "text": ["exact copy"],
     "block": "<registry name from the shortlist, or null to hand-build>", "components": [], "adapt": [],
     "vars": { "<variable id of the block or its components>": "<value>" },
+    "must": ["each of the brief's must items this scene delivers, copied verbatim"],
     "build": "layout and objects in numbers (px, %, hex)", "motion": "the one hero move, eases, hand-off", "sound": [ { "name": "<a sound from the library>", "at": 0.4 } ],
     "media": null OR { "kind": "video | photo", "query": "what is in frame, 3-8 concrete words" }
   } ],
@@ -360,6 +362,30 @@ const PLAN_SHAPE = `{
   "spec": "SPEC.md text following the template",
   "decisions": ["choices you made"]
 }`;
+
+// The guide for this kind of film, for the plan (the story step reads its own): the type's file, or for a title
+// card and other short pieces film.md's short motion pieces; a real place or map, and a website, add theirs.
+const PLACE_WORDS = /\b(map|maps|fort|city|village|country|state|region|river|mountain|temple|palace|castle|island|coast|desert|route|journey|coordinates|location|place)\b/i;
+const URL_WORDS = /https?:\/\/|\bwww\.|\.(com|io|app|ai|dev|in)\b/i;
+export function filmGuide(lib, brief, prompt = '') {
+  const parts = [];
+  const type = TYPE_FILES[brief?.kind];
+  const typeFile = type && lib.file('hyperframes', `references/types/${type}.md`);
+  if (typeFile) parts.push(fs.readFileSync(typeFile.abs, 'utf8').trim());
+  else parts.push(requireSection(lib, 'hyperframes', 'references/film.md', 'short-motion-pieces'));
+  if (PLACE_WORDS.test(prompt)) parts.push(requireSection(lib, 'hyperframes', 'references/film.md', 'maps-and-real-places'));
+  if (URL_WORDS.test(prompt)) parts.push(requireSection(lib, 'hyperframes', 'references/film.md', 'from-a-website'));
+  return parts.join('\n\n');
+}
+
+// How films move and how words become numbers (hyperframes references/motion.md and spec.md): the plan's build
+// and motion are written with these, not from habit.
+function craftGuides(lib) {
+  return [
+    ...['motion-craft', 'transitions-with-a-cause', 'the-right-mechanism', 'common-faults'].map((id) => requireSection(lib, 'hyperframes', 'references/motion.md', id)),
+    ...['turning-words-into-numbers', 'composition-numbers', 'banned-by-default', 'a-look-built-from-a-medium'].map((id) => requireSection(lib, 'hyperframes', 'references/spec.md', id)),
+  ].join('\n\n');
+}
 
 export function planSystem(lib) {
   const template = requireSection(lib, 'hyperframes', 'references/spec.md', 'the-template');
@@ -371,12 +397,15 @@ Rules:
 - Each brief transition of kind "cover" is ONE scene with layer "transition", same id, start = at - duration/2 written as the computed number (2.7, never "3 - 0.6/2"), that duration, no text: it covers the whole frame at its midpoint (hiding the cut) in theme colours and uncovers into the next beat. Use a block from its shortlist only if one fits, else hand-build (build says the shapes, colours and direction).
 - For a "handoff" transition there is no scene: the outgoing beat's motion ends with the exit and the next beat's motion starts with the matching entrance (e.g. whip: smear out 0.2 s / land blurred and sharpen 0.13 s). Say this in both scenes' motion.
 - vars holds only variable ids that the chosen block or components list. A hand-built scene with no components has empty vars: its layout, sizes and fonts go in build.
-- For each scene pick a block from that beat's shortlist BY ITS DESCRIPTION: what it shows must match the beat's intent AND the brief's look.mood (no 3D spectacle for a calm editorial piece, no diagram plates for a wordmark, no chat UI for a headline). If nothing fits, use null and hand-build.
+- The brief's must items are the request: every one is delivered. Give each scene the items it delivers in its must, copied verbatim; every item lands in at least one scene (a film-wide ask like camera shake or grain goes in every main scene it covers). build and motion then say, in numbers, how the scene delivers each of its items.
+- Main and background scenes are hand-built from their build and motion: their block is null. A shortlist item whose technique helps (its typing, its shatter, its shader, its fog) goes in that scene's adapt, picked BY ITS DESCRIPTION to match the beat's intent AND the brief's look.mood; its source is rewritten for this scene, so the scene can do more than the item and its colours become the theme's. Never choose an item for a name or tag match alone (a pastel gradient is no fog, an LCD screen is no VHS static).
+- Overlay and transition scenes may mount a block from their shortlist when it does exactly what they need; otherwise they are hand-built too.
 - A hand-built scene may use components from that beat's component shortlist (list them in components); the scene supplies the copy.
 - adapt: registry items whose source a hand-built scene starts from (their markup, CSS and script, rewritten for this scene's copy, timing and theme; nothing is mounted). When the request says to adapt or use an item it names, put that item in the adapt of the scene it belongs to, and set that scene's block to null.
 - A scene that continues an object from the scene before (the same terminal breaks apart, the same card flips) repeats that object's text in its own text and its size and position in its build, so the cut between them cannot be seen.
 - Never name a block or component outside the shortlists and the requested items.
-- motion and build describe what the chosen block actually does (from its description) and how you tune it: set its behaviour controls in vars. Do not invent effects the block does not have.
+- For a mounted block (overlays and transitions only), motion and build describe what it actually does and how you tune it through its vars. For a hand-built scene, they describe this scene's own layout and motion, built to its must items, using the motion guide below.
+- A held title stays alive when the request asks for life in it (jitter, wiggle, flicker, glitch, breathing, drift): the motion says how, through the whole hold. Otherwise a landed title holds still until it leaves. A long hold with nothing asked of it is a sign the beat is too long: say what carries those seconds (a slow push, a light that moves, a second reveal).
 - If a block animates with its bundled font, keep that font for that scene and say so in decisions; the theme font applies to hand-built scenes.
 - Repeating a block for two beats is fine; vary its controls (e.g. direction) so the beats differ.
 - Add no effects the brief did not ask for (grain, vignette, glow, extra copy).
@@ -397,7 +426,10 @@ ${template}
 </spec-template>
 <look-line>
 ${lookLine}
-</look-line>`;
+</look-line>
+<craft>
+${craftGuides(lib)}
+</craft>`;
 }
 
 // What each candidate IS and DOES, not just its variable names: the plan picks by this.
@@ -429,9 +461,29 @@ const allItems = (sl) => [...Object.values(sl.blocks ?? {}), ...Object.values(sl
 
 // Checks only the shortlist can answer: real variable ids, a background block for the background
 // layer, the brief's preset, readable timing.
+const normAsk = (t) => String(t ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+const unassignedMust = (plan, brief) => {
+  const given = new Set((plan.scenes ?? []).flatMap((s) => (Array.isArray(s.must) ? s.must : []).map(normAsk)));
+  return (Array.isArray(brief?.must) ? brief.must : []).filter((m) => normAsk(m) && !given.has(normAsk(m)));
+};
+
+/**
+ * Every ask the brief took from the request ends up in a scene: one the plan still left out after its repair goes
+ * to every main scene (most are film-wide: a camera shake, a texture, a light). Returns the asks it assigned.
+ */
+export function assignMust(plan, brief) {
+  const missing = unassignedMust(plan, brief);
+  const mains = (plan.scenes ?? []).filter((s) => (s.layer ?? 'main') === 'main');
+  for (const s of mains) s.must = [...(Array.isArray(s.must) ? s.must : []), ...missing];
+  return mains.length ? missing : [];
+}
+
 export function planChecks(plan, brief, sl) {
   const errs = [];
   if (plan.format && brief.format?.duration && Math.abs((plan.format.duration ?? 0) - brief.format.duration) > 0.051) errs.push(`format.duration must be ${brief.format.duration}, as in the brief`);
+  // The request's asks are the film: a real run lost all six of a horror title's (fog, light, scare, shake).
+  const missing = unassignedMust(plan, brief);
+  if (missing.length) errs.push(`these must items are in no scene's must: ${missing.map((m) => `"${m}"`).join('; ')}. Give each, verbatim, to the scene(s) that deliver it, and say in their build and motion how`);
   const info = Object.fromEntries(allItems(sl).map((i) => [i.name, i]));
   const varsOf = (i) => [...i.textVars, ...i.imageVars, ...i.colorVars, ...i.otherVars];
   // The brief decided which beats show real footage; the plan carries it out.
@@ -477,7 +529,7 @@ export function planChecks(plan, brief, sl) {
       errs.push(s.id + ': the background layer must use a block from the background shortlist, not ' + s.block);
     }
     if ((s.layer ?? 'main') !== 'background') {
-      const floor = readFloor(s.text ?? []);
+      const floor = readFloor(s.text ?? [], plan.format?.duration ?? brief.format?.duration);
       if (floor && s.duration < floor - 0.01) errs.push(s.id + ': ' + s.duration + 's is too short to read its copy (needs ' + floor.toFixed(1) + 's)');
     }
   }
@@ -602,15 +654,16 @@ ${JSON.stringify(rows, null, 1)}`, usage, { ...opts, label: 'judge' });
 export async function ask(provider, system, user, usage, { signal, parse = parseModelJson, label = 'ask', log } = {}) {
   const messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
   const json = parse === parseModelJson;
-  let max = config.maxOutputTokens;
+  // A reply cut off at the limit is billed and thrown away, and reasoning models spend much of it thinking (real
+  // DeepSeek scene writes at medium effort ran past 16k). Every OpenRouter model the Studio offers allows 32k
+  // out; a higher limit costs nothing when the reply is short. Other providers keep theirs (GPT-4o caps at 16k).
+  let max = provider.kind === 'openrouter' ? Math.max(config.maxOutputTokens, 32_000) : config.maxOutputTokens;
   let reparsed = false;
   for (let attempt = 0; ; attempt++) {
     signal?.throwIfAborted();
     const started = Date.now();
     const { message, finish, usage: u } = await chat(provider, messages, null, { maxOutputTokens: max, signal, json });
-    usage.input += u.input;
-    usage.output += u.output;
-    usage.calls += 1;
+    addUsage(usage, u);
     const raw = message.content ?? '';
     log?.({ label, provider: `${provider.name}/${provider.model}`, at: new Date(started).toISOString(), seconds: +((Date.now() - started) / 1000).toFixed(1), finish, maxOutputTokens: max, usage: u, system, user, reply: raw });
     // Reasoning models spend output tokens thinking; a reply cut off mid-answer gets one retry with more room.
@@ -717,7 +770,7 @@ export async function runPlan({ prompt, options = {}, onEvent = () => {}, jobsDi
   const provider = providerForRole('planner');
   const ws = dir ? Workspace.open(dir) : Workspace.create(jobsDir);
   const lib = new SkillLibrary(config.skillsDir);
-  const usage = { input: 0, output: 0, calls: 0 };
+  const usage = { input: 0, output: 0, cachedInput: 0, calls: 0, pricedCalls: 0, cost: 0 };
   const prior = ws.readJson('request.json', {});
   ws.writeJson('request.json', { ...prior, prompt, options, createdAt: prior.createdAt ?? new Date().toISOString(), mode });
   onEvent({ type: 'job_start', job: ws.id, dir: ws.dir, resume: Boolean(dir) });
@@ -778,6 +831,7 @@ export async function runPlan({ prompt, options = {}, onEvent = () => {}, jobsDi
   const input = [
     `<brief>\n${JSON.stringify(brief, null, 1)}\n</brief>`,
     storyline ? `<storyline>\nThe film tells this storyline; SPEC.md, each scene's build and motion follow it.\n${JSON.stringify(storyline, null, 1)}\n</storyline>` : null,
+    `<film-guide>\nThe guide for this kind of film (hyperframes skill).\n${filmGuide(lib, brief, prompt)}\n</film-guide>`,
     `<shortlist>\n${shortlistText(lists)}\n</shortlist>`,
   ].filter(Boolean).join('\n\n');
   const ctx = { ws, seenRegistry: new Set(allItems(lists).map((i) => i.name)), readLog: new Set() };
@@ -799,6 +853,8 @@ export async function runPlan({ prompt, options = {}, onEvent = () => {}, jobsDi
   }
   plan.format = withFormat(plan.format, brief.format);
   assertPaidLength(plan.format, options, 'plan');
+  const assigned = assignMust(plan, brief);
+  if (assigned.length) onEvent({ type: 'warning', message: `the plan left ${assigned.length} of the request's asks in no scene; given to every main scene: ${assigned.join('; ')}` });
   ws.writeJson('plan.json', plan);
 
   // 4. Rate (code)

@@ -120,6 +120,7 @@ await step('plan-only checks: instructions are not copy, readable timing, real v
   assert.match(e1, /reads like an instruction/);
   assert.match(e1, /needs 3\.\dsto be read|needs \d\.\ds to be read/);
   assert.equal(readFloor(['one two three']), 2);
+  assert.equal(readFloor(['one two three'], 1), 1, 'a 1-second film needs only its one second');
   // "dark background" is a colour, not a layer
   assert.match(checkBrief({ ...base, background: { wanted: true }, beats: [{ id: 'a', start: 0, end: 4, copy: [] }] }, 'kinetic type on a dark background').join(), /only names a background colour/);
   assert.equal(checkBrief({ ...base, background: { wanted: true }, beats: [{ id: 'a', start: 0, end: 4, copy: [] }] }, 'an animated aurora background').length, 0);
@@ -431,6 +432,44 @@ await step('every pipeline prompt builds from the installed skills (a moved sect
   assert.throws(() => requireSection(lib, 'hyperframes', 'references/look.md', 'no-such-section'), /Skill section missing: hyperframes\/references\/look\.md#no-such-section/);
 });
 
+await step('the text colour always reads on the ground (a real horror title set near-black ink on near-black)', async () => {
+  const { themeRoles, contrastRatio } = await import('../src/build/tokens.js');
+  const dark = themeRoles({ colors: { ground: '#0A0807', ink: '#15100D', accent: '#E08A2E', teal: '#1F6F6B' } });
+  assert.ok(contrastRatio(dark.ink, dark.ground) >= 4.5);
+  assert.notEqual(dark.ink, dark.accent, 'the accent stays the accent');
+  assert.equal(themeRoles({ colors: { ground: '#0A0807', ink: '#15100D', bone: '#E7DFCF' } }).ink, '#E7DFCF', "the theme's own readable colour first");
+  assert.equal(themeRoles({ colors: { ground: '#F5F0E6', ink: '#1A1A1A', accent: '#C1121F' } }).ink, '#1A1A1A', 'a readable theme is untouched');
+});
+
+await step("the request's asks reach every step: plan, scene writer and film guide (a real horror title lost all six)", async () => {
+  const { planSystem, planChecks, assignMust, filmGuide } = await import('../src/plan.js');
+  const { scenePacket } = await import('../src/build/scenes.js');
+  // The plan carries the motion and spec guides, and no longer tells a scene to stay within a block's effects.
+  const sys = planSystem(lib);
+  assert.match(sys, /<craft>\n\S[\s\S]*Motion craft/i);
+  assert.doesNotMatch(sys, /Do not invent effects the block does not have/);
+  // Every ask lands in a scene: a missing one fails the plan check, and code gives it to every main scene after.
+  const brief = { format: { duration: 15 }, background: { wanted: true }, must: ['Sudden jump-scare at 4 s', 'Amber and teal light glows from behind the text'], beats: [] };
+  const plan = { format: { duration: 15 }, scenes: [{ id: 'fog', layer: 'background', must: [] }, { id: 'name', layer: 'main', must: ['Sudden jump-scare at 4 s'] }] };
+  assert.match(planChecks(plan, brief, { blocks: {}, components: {} }).join(), /Amber and teal light glows from behind the text/);
+  assert.deepEqual(assignMust(plan, brief), ['Amber and teal light glows from behind the text']);
+  assert.deepEqual(plan.scenes[1].must, ['Sudden jump-scare at 4 s', 'Amber and teal light glows from behind the text']);
+  assert.deepEqual(planChecks(plan, brief, { blocks: {}, components: {} }), []);
+  // The guide for the kind of film: a title gets short motion pieces; a fort or a map adds real places; a launch its type.
+  assert.match(filmGuide(lib, { kind: 'title' }, 'NIGHTMARE title card'), /short motion/i);
+  assert.match(filmGuide(lib, { kind: 'explainer' }, 'Bhangarh Fort, a map of Rajasthan'), /map/i);
+  assert.ok(filmGuide(lib, { kind: 'launch' }, 'launch our app').length > 1000);
+  // The scene writer sees its asks, the avoid list and the guide; a held title may stay alive when asked.
+  const ctx = { format: { width: 1920, height: 1080, fps: 30 }, roles: { dark: true, ground: '#101014', ink: '#F2EDE4', accent: '#E8B14E', display: 'Inter', body: 'Inter' }, lib, items: {}, hasBackground: false, avoid: ['Bright clean typography'], filmGuide: 'GUIDE TEXT' };
+  const packet = scenePacket({ id: 'name', layer: 'main', duration: 15, text: ['NIGHTMARE'], must: ['The text jitters through the hold'] }, ctx);
+  assert.match(packet.user, /<asks>[\s\S]*The text jitters through the hold[\s\S]*<\/asks>/);
+  assert.match(packet.user, /<avoid>\n- Bright clean typography/);
+  assert.match(packet.user, /<film-guide>\nGUIDE TEXT/);
+  assert.match(packet.system, /unless the scene asks for life in it/);
+  assert.match(packet.system, /<runtimes>\n\S/);
+  assert.doesNotMatch(packet.system, /A landed title is dead still until it leaves\./);
+});
+
 await step('scene writer replies: a fenced html block, the older JSON shape, or a bare template', async () => {
   const { extractHtml } = await import('../src/build/scenes.js');
   const file = '<template>\n  <div id="root" data-composition-id="a"></div>\n  <script>const s = `x`;</script>\n</template>';
@@ -537,7 +576,12 @@ await step('a scene must show its copy whole as visible text (not only in an att
   assert.deepEqual(staticProblems(ok, 'a', 2, ['Slow Mornings']), []);
   // The real case: the "s" lived only in aria-label.
   const lost = ok.replace('<span>Slow</span> <span>Mornings</span>', '<div aria-label="Slow Mornings">Slow&nbsp;Mornin<span>g</span></div>');
-  assert.match(staticProblems(lost, 'a', 2, ['Slow Mornings']).join(), /"Slow Mornings" is not in the markup whole/);
+  assert.match(staticProblems(lost, 'a', 2, ['Slow Mornings']).join(), /"Slow Mornings" is not all in the markup \("Mornings" missing\)/);
+  // A scene makes no sound itself (the renderer refuses Web Audio); its sound is the film's sound track.
+  assert.match(staticProblems('<template><div id="root" data-composition-id="a"><script>const ac = new AudioContext(); window.__timelines["a"]=tl</script></div></template>', 'a', 2, []).join(), /no Web Audio/);
+  // A chart's label and value sit apart (year under the bar, value above): every word present is enough.
+  const chart = '<template><div id="root" data-composition-id="a"><div class="bar"><b>22%</b><i>2019</i></div><script>window.__timelines["a"]=tl</script></div></template>';
+  assert.doesNotMatch(staticProblems(chart, 'a', 2, ['2019 22%']).join(), /is not all in the markup/);
   // Per-letter spans, capitals by CSS and HTML entities still count as the copy.
   const letters = ok.replace('<span>Slow</span> <span>Mornings</span>', 'SLOW&nbsp;<b>M</b><b>O</b>RNINGS &amp; co');
   assert.deepEqual(staticProblems(letters, 'a', 2, ['Slow Mornings & co']), []);
@@ -765,11 +809,19 @@ await step("a film's OpenRouter provider choice and image support reach the requ
     assert.deepEqual([pinned.route, pinned.vision], ['baidu/fp8', false]);
     // The user's own example: only that provider, no fallback.
     assert.deepEqual(requestBody(pinned, []).provider, { only: ['baidu/fp8'], allow_fallbacks: false });
-    assert.deepEqual(requestBody(await film({ route: 'price' }), []).provider, { sort: 'price' });
+    assert.deepEqual(requestBody(await film({ route: 'price' }), []).provider, { sort: 'price', quantizations: ['fp8', 'fp16', 'bf16', 'fp32', 'unknown'] }, 'cheapest, never a 4-bit host');
+    assert.deepEqual(requestBody(await film({ route: 'morph/fp8,deepinfra/fp8/flex' }), []).provider, { order: ['morph/fp8', 'deepinfra/fp8/flex'], allow_fallbacks: false }, 'the cheapest good hosts, in order');
     const auto = await film({});
     assert.equal(requestBody(auto, []).provider, undefined, 'no choice: OpenRouter balances');
     assert.equal(auto.vision, true, "a model with no vision flag keeps the provider's");
     assert.equal(requestBody({ ...config.providers.fakeor, kind: 'azure', route: 'baidu/fp8' }, []).provider, undefined, 'only OpenRouter takes a route');
+    // Every OpenRouter call asks for what it was billed, and the total keeps cost only while every call had one.
+    const { callUsage, addUsage } = await import('../src/llm.js');
+    assert.deepEqual(requestBody(auto, []).usage, { include: true });
+    const u = callUsage({ prompt_tokens: 1000, completion_tokens: 200, prompt_tokens_details: { cached_tokens: 600 }, cost: 0.0012 });
+    assert.deepEqual(u, { input: 1000, output: 200, cachedInput: 600, cost: 0.0012 });
+    const total = addUsage(addUsage({ input: 0, output: 0, calls: 0 }, u), callUsage({ prompt_tokens: 10, completion_tokens: 5 }));
+    assert.deepEqual([total.input, total.cachedInput, total.calls, total.pricedCalls], [1010, 600, 2, 1]);
   } finally {
     delete config.providers.fakeor;
   }

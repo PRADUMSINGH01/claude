@@ -21,6 +21,13 @@ export function luminance(hex) {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
+// WCAG contrast ratio between two colours, 1 (same) to 21 (black on white).
+export function contrastRatio(a, b) {
+  const [la, lb] = [luminance(a), luminance(b)];
+  if (la == null || lb == null) return 21;
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+
 const saturation = (hex) => {
   const rgb = hexToRgb(hex);
   if (!rgb) return 0;
@@ -47,6 +54,14 @@ export function themeRoles(theme) {
   ground ??= byLum[0];
   ink ??= byLum.at(-1);
   if (ground && ink && ground === ink) ink = luminance(ground) > 0.5 ? '#111111' : '#FFFFFF';
+  // Text must read on the ground (WCAG 4.5:1). A real run set "black ink" #15100D on #0A0807 and the title
+  // vanished: take the theme's own colour that reads best, else off-white or near-black.
+  // The accent stays the accent (it marks one word), so it is not taken for the text.
+  if (ground && ink && contrastRatio(ink, ground) < 4.5) {
+    const named = resolve(roles.accent) ?? colors[pick(/^(accent|brand|primary|highlight)$/i)];
+    const best = Object.values(colors).filter((c) => c !== ground && c !== named).sort((a, b) => contrastRatio(b, ground) - contrastRatio(a, ground))[0];
+    ink = best && contrastRatio(best, ground) >= 4.5 ? best : luminance(ground) > 0.35 ? '#111111' : '#F2EDE4';
+  }
   accent ??= Object.values(colors).filter((c) => c !== ground && c !== ink).sort((a, b) => saturation(b) - saturation(a))[0] ?? ink;
   const accent2 = Object.values(colors).filter((c) => ![ground, ink, accent].includes(c)).sort((a, b) => saturation(b) - saturation(a))[0] ?? accent;
 

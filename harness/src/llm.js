@@ -56,6 +56,8 @@ export function requestBody(p, messages, tools, toolChoice, maxOut = config.maxO
     body.reasoning = p.effort === 'none' ? { enabled: false } : { effort: { minimal: 'low', xhigh: 'high', max: 'high' }[p.effort] ?? p.effort };
   }
   if (p.kind === 'openrouter' && p.route) body.provider = openRouterRoute(p.route);
+  // OpenRouter reports what each call was billed (usage.cost, USD): films are charged by that, not a guess.
+  if (p.kind === 'openrouter') body.usage = { include: true };
   // GLM's thinking is only on or off. Low effort turns it off: thinking can spend a whole 16k–32k output
   // budget before a single line of a scene file is written (seen in real runs).
   if (p.kind === 'glm' && p.effort) body.thinking = { type: ['none', 'minimal', 'low'].includes(p.effort) ? 'disabled' : 'enabled' };
@@ -65,7 +67,14 @@ export function requestBody(p, messages, tools, toolChoice, maxOut = config.maxO
 // OpenRouter's provider routing: a sort orders every provider serving the model; a provider tag pins that one,
 // with no fallback to another (the choice is the point: its price, region or quantization).
 export function openRouterRoute(route) {
-  return ['price', 'throughput', 'latency'].includes(route) ? { sort: route } : { only: [route], allow_fallbacks: false };
+  // "Cheapest" skips 4-bit providers: a real run sorted by price landed on an fp4 DeepSeek host that answered the
+  // brief with "{}" and garbled keys, while fp8 hosts at nearly the same price answered it correctly.
+  if (route === 'price') return { sort: 'price', quantizations: ['fp8', 'fp16', 'bf16', 'fp32', 'unknown'] };
+  if (['throughput', 'latency'].includes(route)) return { sort: route };
+  // A comma list: these providers in this order (the first that answers), and no others. A model's vetted cheap
+  // hosts, e.g. DeepSeek's "baidu/fp8,morph/fp8,deepinfra/fp8/flex".
+  if (route.includes(',')) return { order: route.split(',').map((t) => t.trim()).filter(Boolean), allow_fallbacks: false };
+  return { only: [route], allow_fallbacks: false };
 }
 
 // Gemini's function declarations take an OpenAPI subset: no additionalProperties, no type unions,
@@ -88,6 +97,29 @@ export function geminiSchema(s) {
 
 const RETRY = new Set([408, 409, 429, 500, 502, 503, 504, 529]);
 
+// One call's tokens: input (cached input is part of it, billed cheaper), output (reasoning included), and the
+// billed cost in USD when the provider reports it (null otherwise: the server prices it from its table).
+export function callUsage(u) {
+  const cost = Number(u?.cost);
+  return {
+    input: u?.prompt_tokens ?? 0,
+    output: u?.completion_tokens ?? 0,
+    cachedInput: u?.prompt_tokens_details?.cached_tokens ?? 0,
+    cost: Number.isFinite(cost) && cost >= 0 ? cost : null,
+  };
+}
+
+// Adds one call into a running total: tokens, and the cost only while every call so far reported one.
+export function addUsage(total, u) {
+  total.input += u.input;
+  total.output += u.output;
+  total.cachedInput = (total.cachedInput ?? 0) + (u.cachedInput ?? 0);
+  total.calls += 1;
+  total.pricedCalls = (total.pricedCalls ?? 0) + (u.cost == null ? 0 : 1);
+  total.cost = (total.cost ?? 0) + (u.cost ?? 0);
+  return total;
+}
+
 export async function chat(provider, messages, tools, { signal, toolChoice, maxOutputTokens, json } = {}) {
   const body = requestBody(provider, messages, tools, toolChoice, maxOutputTokens, json);
   for (let attempt = 0; ; attempt++) {
@@ -99,13 +131,15 @@ export async function chat(provider, messages, tools, { signal, toolChoice, maxO
       return {
         message: choice.message,
         finish: choice.finish_reason,
-        usage: { input: res.usage?.prompt_tokens ?? 0, output: res.usage?.completion_tokens ?? 0 },
+        usage: callUsage(res.usage),
       };
     } catch (err) {
       const status = err?.status ?? 0;
       // APIConnectionTimeoutError extends APIConnectionError; match the class, not the name string.
       const transient = RETRY.has(status) || err instanceof APIConnectionError
-        || /timed out|timeout|ECONNRESET|ETIMEDOUT|socket hang up|fetch failed/i.test(String(err?.message ?? ''));
+        // "terminated": undici's word for a connection the far end closed mid-reply (a MiniMax film on SambaNova
+        // lost its story step to one and was not retried).
+        || /timed out|timeout|ECONNRESET|ETIMEDOUT|socket hang up|fetch failed|terminated|other side closed/i.test(String(err?.message ?? ''));
       const took = ((Date.now() - started) / 1000).toFixed(0);
       if (!transient || attempt >= 5 || signal?.aborted) {
         console.error(`[llm] ${provider.name}/${provider.model} failed after ${took}s (attempt ${attempt + 1}): ${status || ''} ${String(err?.message ?? err).slice(0, 200)}`);

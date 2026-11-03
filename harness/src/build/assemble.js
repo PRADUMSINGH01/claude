@@ -135,8 +135,13 @@ export async function assemble(ws, plan, brief, { emit = () => {} } = {}) {
     if (s.block && !items[s.block]) warnings.push(`${s.id}: block ${s.block} is not installed; the scene will be written instead`);
     let mode = 'write';
     // A scene with stock media, or one that adapts an item's source, is always written: no mounted item can put
-    // a file under its copy or carry copy its code hard-wires.
-    const written = Boolean(s.media || s.adapt?.length);
+    // a file under its copy or carry copy its code hard-wires. So is every main and background scene: a mounted
+    // item plays its own design and drops what the scene asked for (a real run mounted a 3.5 s word-rise as a
+    // horror jump-scare and lost the fog, the scare, the shake and the ink bleed). The item still helps: its
+    // source goes to the writer to adapt. Overlays and transitions mount when an item carries their copy.
+    const adaptOnly = layer === 'main' || layer === 'background';
+    const written = Boolean(s.media || s.adapt?.length || adaptOnly);
+    if (adaptOnly && s.block && items[s.block] && !s.adapt?.includes(s.block)) s.adapt = [...(s.adapt ?? []), s.block];
     let item = s.block && items[s.block] && !written ? items[s.block] : !s.block && !written && comps.length === 1 && comps[0].mountable ? comps[0] : null;
     let values = {};
     let leftover = [];

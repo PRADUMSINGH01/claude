@@ -655,9 +655,10 @@ export async function ask(provider, system, user, usage, { signal, parse = parse
   const messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
   const json = parse === parseModelJson;
   // A reply cut off at the limit is billed and thrown away, and reasoning models spend much of it thinking (real
-  // DeepSeek scene writes at medium effort ran past 16k). Every OpenRouter model the Studio offers allows 32k
-  // out; a higher limit costs nothing when the reply is short. Other providers keep theirs (GPT-4o caps at 16k).
-  let max = provider.kind === 'openrouter' ? Math.max(config.maxOutputTokens, 32_000) : config.maxOutputTokens;
+  // DeepSeek scene writes at medium effort ran past 16k; a GLM 5.3 Flash title-card write spent 247 s on a cut-off
+  // 16k reply before the 32k retry). Every OpenRouter and GLM model the Studio offers allows 32k out; a higher limit
+  // costs nothing when the reply is short. Other providers keep theirs (GPT-4o caps at 16k).
+  let max = ['openrouter', 'glm'].includes(provider.kind) ? Math.max(config.maxOutputTokens, 32_000) : config.maxOutputTokens;
   let reparsed = false;
   for (let attempt = 0; ; attempt++) {
     signal?.throwIfAborted();

@@ -62,7 +62,8 @@ What the scene must deliver:
 How it looks and moves (the design rules below, in numbers):
 - The scene's asks, build and motion win where they are specific; the rules below fill every gap.
 - Text that must be read: at least 2.6cqmin. Type is sized by its role: the hero words of a title card, a quote or an end card are the picture and fill at least 40% of the box's width (a one-line title is usually 12-20cqh; a quote wraps to more lines rather than shrink); a headline beside other content 6-9cqh; labels 2.6-4cqmin. Real films made every title far too small. At most one word in var(--accent), the word that carries the meaning; when the asks name an accent word or colour, use it.
-- The hero fills at least 40% of the box's width or height. Keep content inside the central 90% of the box, text inside 80%.
+- The hero fills at least 40% of the box's width or height. Keep content inside the central 90% of the box, text inside 80%, through every move (a push-in grows it: size the type for its largest moment).
+- Lines break between words, never inside one: a word or a name stays whole on its line ("Northwind" is never "North / wind"). Text that would not fit gets smaller, not split.
 - One hero move; secondary moves travel 50-70% as far and start 0.1-0.2 s after it; everything else holds still. A landed title holds still until it leaves, unless the scene asks for life in it (jitter, wiggle, flicker, glitch, breathing, drift): then that motion runs through the whole hold.
 - Ease by role (expo.out or power4.out to arrive, power2.inOut to move, power3.in to leave), never one ease on everything. Pick one title entrance from the motion craft list; never fade-and-slide-up on every element.
 - Nothing from the BANNED list: no glow, particles, glass cards, corner labels, frame borders or three cards in a row unless the scene's asks or build call for them.

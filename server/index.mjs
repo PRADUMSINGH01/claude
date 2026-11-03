@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { URL, fileURLToPath } from 'node:url';
+import { execFile } from 'node:child_process';
 import { OAuth2Client } from 'google-auth-library';
 
 // Import harness modules (read-only consumption; no harness files are modified)
@@ -201,9 +202,9 @@ function defaultUser(overrides = {}) {
       displayName,
       firstName,
       lastName,
-      avatarUrl: overrides.avatarUrl || '/dashboard/user-avatar.jpg',
-      company: overrides.company || 'Byreel Motion Studio',
-      bio: overrides.bio || 'Lead Creative Director',
+      avatarUrl: overrides.avatarUrl || null,
+      company: overrides.company || '',
+      bio: overrides.bio || '',
       locale: 'en',
       timezone: 'UTC',
     },
@@ -371,6 +372,18 @@ if (!db.migrations.noDefaultPasswords) {
   db.migrations.noDefaultPasswords = new Date().toISOString();
   saveDb();
   if (cleared) console.warn(`[server] removed the default password from ${cleared} account(s) and ended their sessions`);
+}
+// Accounts were made with a stock photo, "Byreel Motion Studio" and "Lead Creative Director" as their own
+// profile. Once: those placeholders go, so a profile shows only what its owner (or Google) gave.
+if (!db.migrations.noPlaceholderProfiles) {
+  for (const u of db.users) {
+    if (!u.profile) continue;
+    if (u.profile.avatarUrl === '/dashboard/user-avatar.jpg') u.profile.avatarUrl = null;
+    if (u.profile.company === 'Byreel Motion Studio') u.profile.company = '';
+    if (u.profile.bio === 'Lead Creative Director') u.profile.bio = '';
+  }
+  db.migrations.noPlaceholderProfiles = new Date().toISOString();
+  saveDb();
 }
 
 const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
@@ -593,7 +606,31 @@ function canSeeJob(user, job) {
 function presentJob(job) {
   if (!job) return job;
   const { costUsd, ...shown } = job;
-  return { ...shown, play: job.harnessJobId && job.play?.length ? [buildVideoUrl(job.harnessJobId)] : job.play ?? [] };
+  const playable = Boolean(job.harnessJobId && job.play?.length);
+  return { ...shown, play: playable ? [buildVideoUrl(job.harnessJobId)] : job.play ?? [], poster: playable ? buildThumbnailUrl(job.harnessJobId) : null };
+}
+
+// A still of a finished film: one frame from late in it, where the title has landed (a build-up's first frame
+// is often empty). Made once with ffmpeg and kept next to the render; concurrent requests share one run.
+const posterRuns = new Map();
+function filmPoster(jobDir, seconds) {
+  const video = path.join(jobDir, 'project', 'renders', 'final.mp4');
+  const poster = path.join(jobDir, 'project', 'renders', 'poster.jpg');
+  if (fs.existsSync(poster)) return Promise.resolve(poster);
+  if (!fs.existsSync(video)) return Promise.resolve(null);
+  if (posterRuns.has(poster)) return posterRuns.get(poster);
+  const grab = (at) =>
+    new Promise((resolve) => {
+      execFile('ffmpeg', ['-v', 'error', '-y', '-ss', at, '-i', video, '-frames:v', '1', '-vf', 'scale=720:-2', '-q:v', '4', poster], { timeout: 20_000 }, (err) =>
+        resolve(!err && fs.existsSync(poster) ? poster : null)
+      );
+    });
+  // A seek past the end (an unknown length) writes nothing; the first frame is better than no still.
+  const run = grab((Math.max(1, Number(seconds) || 5) * 0.7).toFixed(2))
+    .then((made) => made || grab('0'))
+    .finally(() => posterRuns.delete(poster));
+  posterRuns.set(poster, run);
+  return run;
 }
 
 function syncDiskJobs({ startup = false } = {}) {
@@ -1065,7 +1102,7 @@ async function drainQueue() {
     const result = mode === 'edit'
       ? await withRunSettings(settings, () => runEdit({ prompt: job.prompt, base: path.join(JOBS_DIR, job.editOf), options, jobsDir: JOBS_DIR, onEvent, signal: controller.signal }))
       : await withRunSettings(settings, () => (usePlanBuild ? runFilm : runJob)({
-      prompt: mode === 'resume' ? undefined : job.prompt,
+      prompt: mode === 'resume' ? undefined : job.brand ? `${job.prompt}\n\n${job.brand}` : job.prompt,
       options: mode === 'resume' ? {} : options,
       resume: mode === 'resume' ? resumeDir : undefined,
       jobsDir: JOBS_DIR,
@@ -2157,6 +2194,61 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    // Deleting an account removes everything it owns: profile, sessions and API keys, its films (records and
+    // files) and its chats. It needs the password (an account without one types its email), and it waits while
+    // a paid plan would still renew or a film is still being made.
+    if (pathname === '/api/user/me' && method === 'DELETE') {
+      const user = getAuthenticatedUser(req);
+      if (!user) return sendError(req, res, 401, 'Please sign in to delete your account.', 'UNAUTHORIZED');
+      const body = await readBody(req);
+      const windowMs = 15 * 60 * 1000;
+      if (rateCount(`delete-fail:${user.id}`) >= 8) {
+        return sendError(req, res, 429, 'Too many attempts. Please wait 15 minutes and try again.', 'TOO_MANY_ATTEMPTS');
+      }
+      const confirmed = user.passwordHash
+        ? verifyPassword(String(body.password || ''), user.passwordHash)
+        : String(body.confirm || '').trim().toLowerCase() === String(user.email || '').toLowerCase();
+      if (!confirmed) {
+        rateHit(`delete-fail:${user.id}`, windowMs);
+        return sendError(req, res, 403, user.passwordHash ? 'That password is not right.' : 'Type your email address to confirm.', 'NOT_CONFIRMED');
+      }
+      const p = user.plan;
+      if (p?.source === 'dodo' && ['active', 'past_due'].includes(p.status) && !p.cancelAtPeriodEnd) {
+        return sendError(req, res, 409, 'Cancel your plan in Billing first, so you are not charged again. Then delete the account.', 'PLAN_ACTIVE');
+      }
+      const owned = Array.from(jobsByPromptId.values()).filter((j, i, all) => j.userId === user.id && all.indexOf(j) === i);
+      if (owned.some((j) => j.status === 'queued' || j.status === 'running')) {
+        return sendError(req, res, 409, 'A video is still being made. Delete the account once it has finished.', 'FILM_RUNNING');
+      }
+
+      for (const j of owned) {
+        jobsByPromptId.delete(j.promptId);
+        if (j.harnessJobId) {
+          jobsByPromptId.delete(j.harnessJobId);
+          jobsByHarnessId.delete(j.harnessJobId);
+          if (/^[\w-]+$/.test(j.harnessJobId)) fs.rmSync(path.join(JOBS_DIR, j.harnessJobId), { recursive: true, force: true });
+        }
+        if (db.promptMap) delete db.promptMap[j.promptId];
+      }
+      db.revokedTokens ??= {};
+      for (const [token, id] of Object.entries(db.sessions ?? {})) {
+        if (id !== user.id) continue;
+        db.revokedTokens[token] = true;
+        delete db.sessions[token];
+      }
+      const current = currentToken(req);
+      if (current) db.revokedTokens[current] = true;
+      db.apiKeys = (db.apiKeys ?? []).filter((k) => k.userId !== user.id);
+      for (const store of ['brandKits', 'assets']) if (db[store]) delete db[store][user.id];
+      if (Array.isArray(db.conversations)) db.conversations = db.conversations.filter((c) => c.userId !== user.id);
+      db.users = db.users.filter((u) => u.id !== user.id);
+      fs.rmSync(chatStorePath(user.id), { force: true });
+      saveDb();
+      console.warn(`[server] account ${user.id} deleted by its owner (${owned.length} film(s))`);
+      clearAuthCookies(res);
+      return sendJson(req, res, 200, { success: true, message: 'Your account and everything in it has been deleted.' });
+    }
+
     if (pathname === '/api/user/profile' && method === 'PATCH') {
       const user = getAuthenticatedUser(req);
       if (!user) {
@@ -2318,6 +2410,9 @@ const server = http.createServer(async (req, res) => {
         }
         editOf = base.harnessJobId;
       }
+      // The Studio's brand kit, as a short guide the model reads after the request. It stays out of the prompt
+      // (the 4,000-character budget and the title are the person's own words); an edit keeps its film's look.
+      const brand = !editOf && typeof body.brand === 'string' ? body.brand.trim().slice(0, 800) : '';
 
       // Only a model from the Studio list, and the pricier ones only on a paid plan.
       const choice = await chooseModel(user, body);
@@ -2376,6 +2471,7 @@ const server = http.createServer(async (req, res) => {
         theme: inheritedTheme || null,
         title: prompt.slice(0, 56),
         prompt,
+        ...(brand ? { brand } : {}),
         ratio,
         play: [],
         durationS,
@@ -2513,7 +2609,8 @@ const server = http.createServer(async (req, res) => {
     if (thumbMatch && (method === 'GET' || method === 'HEAD')) {
       const jobId = decodeURIComponent(thumbMatch[1]);
       if (!validMediaKey(jobId, parsedUrl.searchParams.get('k'))) return sendError(req, res, 404, 'Thumbnail not found', 'THUMBNAIL_NOT_FOUND');
-      const snapPath = findJobSnapshotPath(path.join(JOBS_DIR, jobId));
+      const jobDir = path.join(JOBS_DIR, path.basename(jobId));
+      const snapPath = (await filmPoster(jobDir, jobsByHarnessId.get(jobId)?.durationS)) || findJobSnapshotPath(jobDir);
       if (!snapPath || !fs.existsSync(snapPath)) {
         return sendError(req, res, 404, 'Thumbnail not found', 'THUMBNAIL_NOT_FOUND');
       }

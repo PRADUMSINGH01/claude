@@ -42,6 +42,7 @@ Rules for an edit:
 - Every scene whose look, copy, motion or timing changes is in changes, with a concrete instruction for its file. A new scene is in changes too ("new scene: …"). A removed scene is simply left out of the plan.
 - A restyle or redesign ("make it brutalist", "use our brand colours", "darker", "more playful") changes the theme and the build of every scene it affects: list each of them in changes.
 - Copy the request gives is used verbatim. format.duration stays ${base.plan.format?.duration} s: fit the change inside it.
+- A size asked for in words ("twice as big", "much bigger") means as close to it as the frame allows with the text inside the central 80%: never split a word or a name across lines to reach it ("Northwind" never becomes "North / wind"). When the exact size doesn't fit, use the largest that does and say so in summary.
 - must is the current list with this request folded in: an ask the request reverses is replaced, a new one added.`;
 }
 

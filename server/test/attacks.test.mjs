@@ -23,7 +23,7 @@ function startServer(t, env = {}, seed = null) {
   const port = 19000 + Math.floor(Math.random() * 900);
   const child = spawn(process.execPath, [serverFile], {
     // MAX_CONCURRENT_JOBS 0: a film is accepted and stays queued, so no model is ever called.
-    env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', SERVER_DATA_DIR: data, JOBS_DIR: path.join(data, 'jobs'), PUBLIC_API_URL: `http://127.0.0.1:${port}`, JWT_SECRET: 'attack-test-secret', MAX_CONCURRENT_JOBS: '0', GOOGLE_CLIENT_ID: '', GOOGLE_CLIENT_SECRET: '', RESEND_API_KEY: '', EMAIL_FROM: '', ADMIN_EMAILS: '', ADMIN_USER_IDS: '', ...env },
+    env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', SERVER_DATA_DIR: data, JOBS_DIR: path.join(data, 'jobs'), PUBLIC_API_URL: `http://127.0.0.1:${port}`, JWT_SECRET: 'attack-test-secret', MAX_CONCURRENT_JOBS: '0', OPENROUTER_MODELS_URL: 'http://127.0.0.1:9/offline', GOOGLE_CLIENT_ID: '', GOOGLE_CLIENT_SECRET: '', RESEND_API_KEY: '', EMAIL_FROM: '', ADMIN_EMAILS: '', ADMIN_USER_IDS: '', ...env },
     stdio: ['ignore', 'ignore', 'ignore'],
   });
   const base = `http://127.0.0.1:${port}`;

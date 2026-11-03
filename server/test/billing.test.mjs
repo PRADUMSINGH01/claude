@@ -11,12 +11,51 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { charge, creditCost, credits, effectiveTier, paywall, refund, verifyWebhook } from '../billing.mjs';
+import { charge, creditCost, credits, creditsForCost, effectiveTier, estimateCredits, measuredCost, paywall, refund, settle, tokenCost, verifyWebhook } from '../billing.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const secretBytes = crypto.randomBytes(24);
 const SECRET = `whsec_${secretBytes.toString('base64')}`;
 const sign = (body, id, ts) => `v1,${crypto.createHmac('sha256', secretBytes).update(`${id}.${ts}.${body}`).digest('base64')}`;
+
+test('a film is charged what it measured: model spend plus render time, held as an estimate, settled once', () => {
+  const deepseek = { in: 0.045, out: 0.5, cacheRead: 0.006 }; // OpenRouter list price per million tokens
+  // A real 15 s DeepSeek title card: 62.6k in, 74.7k out = $0.040, plus 15 s of render = 5 credits at $0.01.
+  const usage = { planner: { input: 19993, output: 13469, calls: 3 }, builder: { input: 42619, output: 61217, calls: 6 } };
+  const cost = measuredCost(usage, deepseek);
+  assert.ok(Math.abs(cost - 0.0402) < 0.0005, `about $0.040, got ${cost}`);
+  assert.equal(creditsForCost(cost, 15), 5);
+  // The billed cost OpenRouter reported wins over the list price when every call has it.
+  assert.equal(measuredCost({ builder: { input: 1000, output: 1000, calls: 2, pricedCalls: 2, cost: 0.5 } }, deepseek), 0.5);
+  assert.ok(measuredCost({ builder: { input: 1000, output: 1000, calls: 2, pricedCalls: 1, cost: 0.5 } }, deepseek) < 0.01, 'a role missing a billed cost is priced from its tokens');
+  assert.equal(measuredCost(usage, null), null, 'no billed cost and no price: unknown');
+  // Cached input is billed at the cache price.
+  assert.ok(tokenCost({ input: 1e6, cachedInput: 1e6, output: 0 }, deepseek) < tokenCost({ input: 1e6, output: 0 }, deepseek));
+  // A cheap model makes a short film cost a credit; an unknown price holds the flat rate.
+  assert.equal(creditsForCost(0.002, 5), 1);
+  assert.equal(estimateCredits(null, 15), creditCost(15));
+  assert.ok(estimateCredits({ in: 2, out: 10 }, 15) > estimateCredits(deepseek, 15), 'a top model holds more');
+
+  // Held, then settled: less is given back; more is charged only as far as the credits left allow; once.
+  const user = { id: 'usr_m', email: 'm@example.com' };
+  const a = {};
+  charge(user, a, 15, 8);
+  assert.equal(credits(user).remaining, 7);
+  assert.equal(settle(user, a, 5), 5);
+  assert.equal(credits(user).remaining, 10);
+  assert.equal(settle(user, a, 1), null, 'settled once');
+  const b = {};
+  charge(user, b, 15, 6);
+  assert.equal(settle(user, b, 30), 10, 'over the hold: charged up to what was left (4 more), never below zero');
+  assert.equal(credits(user).remaining, 0);
+  // A failed film is refunded what it held, and is not settled after.
+  const user2 = { id: 'usr_f', email: 'f2@example.com' };
+  const c = {};
+  charge(user2, c, 15, 7);
+  assert.equal(refund(user2, c), true);
+  assert.equal(settle(user2, c, 3), null);
+  assert.equal(credits(user2).remaining, 15);
+});
 
 test('credits, paywall and refunds follow the pricing page', () => {
   assert.equal(creditCost(15), 5);

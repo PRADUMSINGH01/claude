@@ -13,9 +13,57 @@ export const PAID_TIERS = ['creator', 'pro', 'enterprise'];
 const INTERVALS = ['monthly', 'annual'];
 const MONTH_MS = 30 * 24 * 3600 * 1000;
 
-// A film costs a credit per 3 seconds, at least 2: the free 15 credits make three 15 s drafts or five
-// 9 s B-roll clips, as the pricing page promises.
+// The flat rate: a credit per 3 seconds, at least 2. Used only when a film's model has no known price (so a
+// price lookup that fails never blocks or undercharges a film).
 export const creditCost = (seconds) => Math.max(2, Math.ceil(Number(seconds || 15) / 3));
+
+// ---- Measured credits -----------------------------------------------------------------------------------
+// A film is charged by what it used, not by its length alone: the model's cost in USD (OpenRouter reports
+// what each call was billed; a model billed directly is priced at the same model's OpenRouter list price) plus
+// its render time, at CREDIT_USD a credit. A short title on a cheap model costs 1-2 credits; a long film on a
+// top model costs what it really did.
+const positive = (name, fallback) => {
+  const v = Number(env(name));
+  return Number.isFinite(v) && v > 0 ? v : fallback;
+};
+export const creditUsd = () => positive('CREDIT_USD', 0.01);
+export const renderUsdPerSecond = () => positive('RENDER_USD_PER_SECOND', 0.0005);
+
+// What a film of this length typically uses, planning and building together (the middle of real 15 s films: about
+// 75k tokens in and 100k out; a title card uses less, a 7-beat explainer twice that). Only for the estimate a film
+// holds when it starts: it is charged what it measures.
+export const typicalTokens = (seconds) => ({ input: 30_000 + 3_000 * seconds, cachedInput: 0, output: 25_000 + 5_000 * seconds });
+
+// USD for these tokens at a price per million tokens { in, out, cacheRead }. Cached input is part of input.
+export function tokenCost(tokens, price) {
+  const input = Number(tokens?.input) || 0;
+  const cached = Math.min(Number(tokens?.cachedInput) || 0, input);
+  return ((input - cached) * price.in + cached * (price.cacheRead ?? price.in) + (Number(tokens?.output) || 0) * price.out) / 1e6;
+}
+
+export const creditsForCost = (costUsd, seconds) => Math.max(1, Math.ceil((Number(costUsd) + Number(seconds || 0) * renderUsdPerSecond()) / creditUsd() - 1e-9));
+
+// What a film should hold when it starts: the typical use of this length at this model's price, or the flat
+// rate when the price is unknown.
+export const estimateCredits = (price, seconds) => (price ? creditsForCost(tokenCost(typicalTokens(seconds), price), seconds) : creditCost(seconds));
+
+/**
+ * What a finished film measured, in USD, from its usage.json ({ planner, builder }: input, output, cachedInput,
+ * calls, pricedCalls, cost). A role whose every call reported its billed cost counts that; any other role is
+ * priced from its tokens. null when a role can be neither (no price known).
+ */
+export function measuredCost(usage, price) {
+  let total = 0;
+  let any = false;
+  for (const role of Object.values(usage ?? {})) {
+    if (!role || typeof role !== 'object' || !((role.input ?? 0) + (role.output ?? 0))) continue;
+    any = true;
+    if (role.calls && role.pricedCalls === role.calls && Number.isFinite(role.cost)) total += role.cost;
+    else if (price) total += tokenCost(role, price);
+    else return null;
+  }
+  return any ? total : null;
+}
 
 const env = (name) => (process.env[name] ?? '').trim();
 // Dodo documents DODO_PAYMENTS_API_KEY; DODO_API_KEY is accepted too.
@@ -64,27 +112,47 @@ export function credits(user, now = Date.now()) {
   return c;
 }
 
-// The paywall: may this user order a film this long? Returns null, or the 402 to send.
-export function paywall(user, seconds, now = Date.now()) {
+// The paywall: may this user order a film this long, holding this many credits? Returns null, or the 402.
+export function paywall(user, seconds, now = Date.now(), cost = creditCost(seconds)) {
   const c = credits(user, now);
   const plan = PLANS[c.tier];
   if (seconds > plan.maxSeconds) {
     return { code: 'PLAN_LIMIT', message: `The ${c.tier} plan makes films up to ${plan.maxSeconds} s. Upgrade for longer films.`, tier: c.tier, maxSeconds: plan.maxSeconds, upgradeUrl: '/pricing' };
   }
-  const cost = creditCost(seconds);
   if (c.remaining < cost) {
     return { code: 'CREDITS_EXHAUSTED', message: `This film needs ${cost} credits and you have ${c.remaining} left this period.`, tier: c.tier, required: cost, remaining: c.remaining, resetsAt: c.periodEnd, upgradeUrl: '/pricing' };
   }
   return null;
 }
 
-export function charge(user, job, seconds) {
+// A film starts: it holds its estimate (settled when it finishes, refunded if it fails).
+export function charge(user, job, seconds, cost = creditCost(seconds)) {
   const c = credits(user);
   job.userId = user.id;
-  job.credits = creditCost(seconds);
+  job.credits = cost;
+  job.creditsHeld = cost;
   job.creditsRefunded = false;
+  job.creditsSettled = false;
   c.used += job.credits;
   c.remaining = Math.max(0, c.limit - c.used);
+}
+
+/**
+ * A film finished: its hold becomes what it measured. Less than held is given back; more is charged as far as
+ * the credits left allow (a film already made is never taken away). Once per film; returns the credits charged.
+ */
+export function settle(user, job, measured) {
+  if (!user || !job.credits || job.creditsSettled || job.creditsRefunded || !Number.isFinite(measured)) return null;
+  const c = credits(user);
+  const held = job.credits;
+  const extra = Math.min(Math.max(0, measured - held), c.remaining);
+  const back = Math.max(0, held - measured);
+  c.used = Math.max(0, c.used + extra - back);
+  c.remaining = Math.max(0, c.limit - c.used);
+  job.credits = held + extra - back;
+  job.creditsMeasured = measured;
+  job.creditsSettled = true;
+  return job.credits;
 }
 
 // A film that failed costs nothing. Once per job.

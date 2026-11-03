@@ -21,6 +21,7 @@ const endpoints = {
       { tag: 'novita/fp8', provider_name: 'Novita', quantization: 'fp8', pricing: { prompt: '0.0000002', completion: '0.00000078' }, context_length: 1048576, uptime_last_1d: 99.5, supported_parameters: ['tools', 'reasoning'] },
       { tag: 'baidu/fp8', provider_name: 'Baidu', quantization: 'fp8', pricing: { prompt: '0.00000003', completion: '0.00000014' }, context_length: 1048576, uptime_last_1d: 100, supported_parameters: ['tools'] },
       { tag: 'notools', provider_name: 'No Tools', quantization: 'unknown', pricing: { prompt: '0', completion: '0' }, context_length: 8192, supported_parameters: ['reasoning'] },
+      { tag: 'cheap/fp4', provider_name: 'Cheap Four', quantization: 'fp4', pricing: { prompt: '0.00000001', completion: '0.00000001' }, context_length: 1048576, uptime_last_1d: 100, supported_parameters: ['tools'] },
     ],
   },
 };
@@ -68,7 +69,7 @@ test('OpenRouter: free, value and top models; a film picks a provider that reall
 
   // The picker's list: providers with tool calls only, cheapest first, prices per million tokens.
   const routes = (await call('/api/models/routes?model=deepseek/deepseek-v4.1-flash')).json;
-  assert.deepEqual(routes.providers.map((p) => [p.tag, p.inputPerM, p.outputPerM]), [['baidu/fp8', 0.03, 0.14], ['novita/fp8', 0.2, 0.78]]);
+  assert.deepEqual(routes.providers.map((p) => [p.tag, p.inputPerM, p.outputPerM]), [['cheap/fp4', 0.01, 0.01], ['baidu/fp8', 0.03, 0.14], ['novita/fp8', 0.2, 0.78]], 'the picker lists every host with tool calls, 4-bit ones too (shown as such)');
   assert.deepEqual(routes.sorts, ['price', 'throughput', 'latency']);
   assert.equal((await call('/api/models/routes?model=evil/model')).status, 404, 'only Studio models are looked up');
   await call('/api/models/routes?model=deepseek/deepseek-v4.1-flash');
@@ -94,4 +95,15 @@ test('OpenRouter: free, value and top models; a film picks a provider that reall
   const free = await film(bo, { model: 'nvidia/nemotron-3-ultra-550b-a55b:free', route: 'price' });
   assert.equal(free.status, 202);
   assert.deepEqual([free.json.job.route, free.json.job.vision], ['price', false], 'a sort needs no lookup; a text-only model is marked');
+
+  // Editing: only your own finished film.
+  assert.deepEqual([(await film(bo, { model: 'deepseek/deepseek-v4.1-flash', editOf: 'ana-1' })).status], [404], "another account's film can't be edited");
+  assert.deepEqual([(await film(ana, { model: 'deepseek/deepseek-v4.1-flash', editOf: 'ana-1' })).json.error], ['EDIT_NOT_READY'], 'a film still in the queue is not edited');
+  assert.equal((await film(ana, { model: 'deepseek/deepseek-v4.1-flash', editOf: 'nope' })).status, 404);
+
+  // Auto: the cheapest hosts that answer well, cheapest first; a 4-bit host is never one of them, however cheap.
+  const cy = await signUp('cy@example.com');
+  const auto = await film(cy, { model: 'deepseek/deepseek-v4.1-flash' });
+  assert.equal(auto.status, 202);
+  assert.equal(auto.json.job.route, 'baidu/fp8,novita/fp8');
 });

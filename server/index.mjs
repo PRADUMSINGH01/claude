@@ -12,6 +12,7 @@ import { OAuth2Client } from 'google-auth-library';
 // Import harness modules (read-only consumption; no harness files are modified)
 import { runJob } from '../harness/src/orchestrator.js';
 import { runFilm } from '../harness/src/film.js';
+import { runEdit } from '../harness/src/edit.js';
 import {
   config,
   providerStatus,
@@ -19,7 +20,7 @@ import {
   withRunSettings,
 } from '../harness/src/config.js';
 import { listThemes } from '../harness/src/tools/registry-tools.js';
-import { applyEvent, BillingError, billingConfigured, charge, creditCost, credits, effectiveTier, isAdmin, listPlans, paywall, PLANS, portalLink, refund, startCheckout, syncFromDodo, verifyWebhook } from './billing.mjs';
+import { applyEvent, BillingError, billingConfigured, charge, credits, creditsForCost, effectiveTier, estimateCredits, isAdmin, listPlans, measuredCost, paywall, PLANS, portalLink, refund, settle, startCheckout, syncFromDodo, verifyWebhook } from './billing.mjs';
 
 const JOBS_DIR = config.jobsDir;
 // plan-build (default): plan in a few short calls, then code assembles and the model writes only
@@ -75,6 +76,95 @@ if (!googleClient) {
 }
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
+
+// ---------------------------------------------------------------------------
+// Studio chats: one file per account (data/chats/<userId>.json), apart from db.json, which is rewritten whole
+// on every change. A chat holds prompts, each take's result and the settings it used; build logs and live
+// progress are not kept (a running take's progress comes from its job).
+// ---------------------------------------------------------------------------
+const CHATS_DIR = path.join(DATA_DIR, 'chats');
+fs.mkdirSync(CHATS_DIR, { recursive: true });
+const MAX_CHATS = 300;
+const MAX_CHAT_BYTES = 256 * 1024;
+const TOMBSTONE_DAYS = 90;
+const chatStorePath = (userId) => path.join(CHATS_DIR, `${String(userId).replace(/[^\w-]/g, '')}.json`);
+
+function readChatStore(userId) {
+  try {
+    const data = JSON.parse(fs.readFileSync(chatStorePath(userId), 'utf8'));
+    return { chats: data.chats ?? {}, deleted: data.deleted ?? {} };
+  } catch {
+    return { chats: {}, deleted: {} };
+  }
+}
+
+// Written to a temporary file and renamed: a crash mid-write never leaves half a file.
+function writeChatStore(userId, store) {
+  const cutoff = Date.now() - TOMBSTONE_DAYS * 24 * 60 * 60 * 1000;
+  for (const [id, at] of Object.entries(store.deleted)) if (Date.parse(at) < cutoff) delete store.deleted[id];
+  const file = chatStorePath(userId);
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(store));
+  fs.renameSync(tmp, file);
+}
+
+// Past MAX_CHATS, the least recently used chats go (as deletions, so browsers drop them too).
+function trimChatStore(store) {
+  const ids = Object.keys(store.chats);
+  if (ids.length <= MAX_CHATS) return;
+  ids.sort((a, b) => String(store.chats[b].updatedAt).localeCompare(String(store.chats[a].updatedAt)));
+  for (const id of ids.slice(MAX_CHATS)) {
+    delete store.chats[id];
+    store.deleted[id] = new Date().toISOString();
+  }
+}
+
+// A chat as the app sends it, keeping only known fields of known types. Throws with the reason.
+function cleanChat(body, id) {
+  const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : undefined);
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  const iso = (v) => (typeof v === 'string' && Number.isFinite(Date.parse(v)) ? new Date(v).toISOString() : undefined);
+  const pick = (obj) => Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
+  if (!body || typeof body !== 'object' || body.id !== id) throw new Error('The chat id in the body must match the URL.');
+  if (!Array.isArray(body.messages) || body.messages.length > 400) throw new Error('A chat needs a messages list (at most 400).');
+  const messages = body.messages.map((m) => {
+    if (!m || typeof m.id !== 'string' || !['user', 'assistant'].includes(m.role)) throw new Error('Each message needs an id and a role.');
+    return pick({
+      id: str(m.id, 100),
+      role: m.role,
+      content: str(m.content, 8000) ?? '',
+      createdAt: iso(m.createdAt) ?? new Date().toISOString(),
+      promptId: str(m.promptId, 100),
+      harnessJobId: str(m.harnessJobId, 100),
+      preview: m.preview && typeof m.preview === 'object' ? pick({ title: str(m.preview.title, 200), url: str(m.preview.url, 2000) }) : undefined,
+      stages: Array.isArray(m.stages) ? m.stages.slice(0, 12).map((s) => pick({ id: str(s?.id, 40), label: str(s?.label, 80), state: ['pending', 'running', 'done'].includes(s?.state) ? s.state : 'pending' })) : undefined,
+      isStreaming: m.isStreaming === true ? true : undefined,
+      isError: m.isError === true ? true : undefined,
+      paywall: ['PLAN_LIMIT', 'CREDITS_EXHAUSTED'].includes(m.paywall) ? m.paywall : undefined,
+      tokens: num(m.tokens),
+      tokenDetails: m.tokenDetails && typeof m.tokenDetails === 'object' ? pick({ total: num(m.tokenDetails.total), input: num(m.tokenDetails.input), cachedInput: num(m.tokenDetails.cachedInput), output: num(m.tokenDetails.output) }) : undefined,
+      provider: str(m.provider, 40),
+      model: str(m.model, 120),
+      effort: str(m.effort, 20),
+      route: str(m.route, 80),
+      ratio: ['16:9', '9:16', '1:1'].includes(m.ratio) ? m.ratio : undefined,
+      length: num(m.length),
+      notes: Array.isArray(m.notes) ? m.notes.slice(0, 5).map((n) => str(n, 300)).filter(Boolean) : undefined,
+    });
+  });
+  const s = body.settings && typeof body.settings === 'object' ? body.settings : {};
+  const chat = pick({
+    id,
+    title: str(body.title, 200) ?? 'Untitled video',
+    createdAt: iso(body.createdAt) ?? new Date().toISOString(),
+    updatedAt: iso(body.updatedAt) ?? new Date().toISOString(),
+    messages,
+    settings: pick({ ratio: ['16:9', '9:16', '1:1'].includes(s.ratio) ? s.ratio : undefined, length: num(s.length), provider: str(s.provider, 40), model: str(s.model, 120), effort: str(s.effort, 20), route: str(s.route, 80), sound: typeof s.sound === 'boolean' ? s.sound : undefined }),
+    theme: body.theme && typeof body.theme === 'object' && typeof body.theme.jobId === 'string' ? { jobId: str(body.theme.jobId, 100), name: str(body.theme.name, 100) ?? '' } : undefined,
+  });
+  if (Buffer.byteLength(JSON.stringify(chat)) > MAX_CHAT_BYTES) throw new Error('This chat is too large to save.');
+  return chat;
+}
 fs.mkdirSync(JOBS_DIR, { recursive: true });
 
 // ---------------------------------------------------------------------------
@@ -417,17 +507,19 @@ function aggregateUsageTokens(usageObj) {
   if (!usageObj || typeof usageObj !== 'object') return null;
   let input = 0;
   let output = 0;
+  let cachedInput = 0;
   for (const role of Object.values(usageObj)) {
     if (role && typeof role === 'object') {
       input += Number(role.input || 0);
       output += Number(role.output || 0);
+      cachedInput += Number(role.cachedInput || 0);
     }
   }
   if (input === 0 && output === 0) return null;
   return {
     total: input + output,
     input,
-    cachedInput: 0,
+    cachedInput,
     output,
   };
 }
@@ -500,7 +592,8 @@ function canSeeJob(user, job) {
 // What a client is sent for a film: its media links rebuilt with their keys (older records hold bare links).
 function presentJob(job) {
   if (!job) return job;
-  return { ...job, play: job.harnessJobId && job.play?.length ? [buildVideoUrl(job.harnessJobId)] : job.play ?? [] };
+  const { costUsd, ...shown } = job;
+  return { ...shown, play: job.harnessJobId && job.play?.length ? [buildVideoUrl(job.harnessJobId)] : job.play ?? [] };
 }
 
 function syncDiskJobs({ startup = false } = {}) {
@@ -902,6 +995,12 @@ function createHarnessEventHandler(job) {
         break;
       }
 
+      // What the person should know about the finished film (a scene that fell back to a simple version).
+      case 'warning': {
+        if (ev.userFacing && ev.message) job.notes = [...(job.notes ?? []), String(ev.message).slice(0, 300)].slice(-5);
+        break;
+      }
+
       case 'job_done': {
         job.status = 'done';
         job.stage = 'done';
@@ -962,8 +1061,10 @@ async function drainQueue() {
     // A resumed job keeps the pipeline it started with.
     const resumedMode = mode === 'resume' ? readJsonSafe(path.join(resumeDir, 'harness', 'request.json'))?.mode : null;
     const usePlanBuild = mode === 'resume' ? resumedMode === 'plan-build' : PIPELINE === 'plan-build';
-    pushLog(job, `Pipeline: ${usePlanBuild ? 'plan + build' : 'agents'}`);
-    const result = await withRunSettings(settings, () => (usePlanBuild ? runFilm : runJob)({
+    pushLog(job, `Pipeline: ${mode === 'edit' ? `edit of ${job.editOf}` : usePlanBuild ? 'plan + build' : 'agents'}`);
+    const result = mode === 'edit'
+      ? await withRunSettings(settings, () => runEdit({ prompt: job.prompt, base: path.join(JOBS_DIR, job.editOf), options, jobsDir: JOBS_DIR, onEvent, signal: controller.signal }))
+      : await withRunSettings(settings, () => (usePlanBuild ? runFilm : runJob)({
       prompt: mode === 'resume' ? undefined : job.prompt,
       options: mode === 'resume' ? {} : options,
       resume: mode === 'resume' ? resumeDir : undefined,
@@ -993,6 +1094,18 @@ async function drainQueue() {
     job.canRetry = false;
     job.updatedAt = new Date().toISOString();
     pushLog(job, 'Video ready');
+    // Charged what it measured, not what it held: model spend (billed cost, or tokens at the model's price)
+    // plus render time.
+    const owner = db.users.find((u) => u.id === job.userId);
+    if (owner && result?.usage && job.credits && !job.creditsSettled) {
+      const cost = measuredCost(result.usage, await modelPrice(job.provider, job.model).catch(() => null));
+      if (cost != null) {
+        const charged = settle(owner, job, creditsForCost(cost, job.durationS || 15));
+        job.costUsd = +cost.toFixed(5);
+        pushLog(job, `Charged ${charged} credits for what it used (held ${job.creditsHeld})`);
+        saveDb();
+      }
+    }
     persistJobRecord(job);
   } catch (err) {
     console.error(`[server] Harness job failed for promptId=${job.promptId}:`, err?.message || err);
@@ -1315,31 +1428,31 @@ const MODEL_CATALOG = [
     provider: 'azure',
     name: 'Azure AI',
     models: [
-      { id: 'gpt-5-mini', name: 'GPT-5 Mini', tag: 'Serverless MaaS', defaultEffort: 'high', efforts: ['low', 'medium', 'high', 'max'], description: 'Fast concise reasoning & swift logic' },
-      { id: 'DeepSeek-V4-Pro', name: 'DeepSeek V4 Pro', tag: 'Serverless MaaS', defaultEffort: 'high', efforts: ['low', 'medium', 'high', 'max'], description: 'Fast code generation and animation scripting' }
+      { id: 'gpt-5-mini', name: 'GPT-5 Mini', tag: 'Serverless MaaS', priceAs: 'openai/gpt-5-mini', defaultEffort: 'high', efforts: ['low', 'medium', 'high', 'max'], description: 'Fast concise reasoning & swift logic' },
+      { id: 'DeepSeek-V4-Pro', name: 'DeepSeek V4 Pro', priceAs: 'deepseek/deepseek-v4-pro', tag: 'Serverless MaaS', defaultEffort: 'high', efforts: ['low', 'medium', 'high', 'max'], description: 'Fast code generation and animation scripting' }
     ]
   },
   {
     provider: 'glm',
     name: 'Zhipu GLM',
     models: [
-      { id: 'glm-5.3-flash', name: 'GLM 5.3 Flash', tag: 'Ultra Fast', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'High speed Chinese/English multimodal reasoning' },
-      { id: 'glm-4.6', name: 'GLM 4.6', tag: 'Standard', defaultEffort: 'low', efforts: ['low', 'medium'], description: 'Standard GLM model' }
+      { id: 'glm-5.3-flash', name: 'GLM 5.3 Flash', priceAs: 'z-ai/glm-5.3-flash', tag: 'Ultra Fast', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'High speed Chinese/English multimodal reasoning' },
+      { id: 'glm-4.6', name: 'GLM 4.6', priceAs: 'z-ai/glm-4.6', tag: 'Standard', defaultEffort: 'low', efforts: ['low', 'medium'], description: 'Standard GLM model' }
     ]
   },
   {
     provider: 'claude',
     name: 'Anthropic Claude',
     models: [
-      { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', paid: true, tag: 'Top Tier Visuals', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'State of the art layout, typography & canvas aesthetics' }
+      { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', priceAs: 'anthropic/claude-sonnet-5.5', paid: true, tag: 'Top Tier Visuals', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'State of the art layout, typography & canvas aesthetics' }
     ]
   },
   {
     provider: 'openai',
     name: 'OpenAI GPT',
     models: [
-      { id: 'gpt-5-mini', name: 'GPT-5 Mini', tag: 'Reasoning', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'Fast concise reasoning' },
-      { id: 'gpt-4o', name: 'GPT-4o', paid: true, tag: 'Omni', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'Multimodal flagship' }
+      { id: 'gpt-5-mini', name: 'GPT-5 Mini', tag: 'Reasoning', priceAs: 'openai/gpt-5-mini', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'Fast concise reasoning' },
+      { id: 'gpt-4o', name: 'GPT-4o', priceAs: 'openai/gpt-4o', paid: true, tag: 'Omni', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'Multimodal flagship' }
     ]
   },
   // OpenRouter: one key, many labs. Free models cost nothing but share a daily request limit across the whole
@@ -1383,7 +1496,7 @@ const MODEL_CATALOG = [
     provider: 'gemini',
     name: 'Google Gemini',
     models: [
-      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', tag: 'Multimodal', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'Long context fast prototyping' }
+      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', priceAs: 'google/gemini-2.5-flash', tag: 'Multimodal', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'Long context fast prototyping' }
     ]
   }
 ];
@@ -1419,6 +1532,52 @@ async function openRouterProviders(model) {
   return providers;
 }
 
+// Price per million tokens { in, out, cacheRead } for a film's model: OpenRouter's list price for it, or for
+// the same model when a provider bills it directly (priceAs in the catalog). From OpenRouter's public model
+// list, cached a day; null when unknown (the film then holds and pays the flat rate).
+let priceList = { at: 0, byId: null };
+async function openRouterPrices() {
+  if (priceList.byId && Date.now() - priceList.at < 24 * 60 * 60 * 1000) return priceList.byId;
+  const res = await fetch(OPENROUTER_MODELS_URL, { signal: AbortSignal.timeout(8000) });
+  if (!res.ok) throw new Error(`OpenRouter answered ${res.status}`);
+  const per1M = (v) => Number(v) * 1e6;
+  const byId = new Map();
+  for (const m of (await res.json())?.data ?? []) {
+    const p = m?.pricing;
+    if (!m?.id || !p || !Number.isFinite(per1M(p.prompt)) || !Number.isFinite(per1M(p.completion))) continue;
+    byId.set(m.id, { in: per1M(p.prompt), out: per1M(p.completion), cacheRead: Number.isFinite(per1M(p.input_cache_read)) ? per1M(p.input_cache_read) : per1M(p.prompt) });
+  }
+  priceList = { at: Date.now(), byId };
+  return byId;
+}
+
+async function modelPrice(provider, model) {
+  const id = provider === 'openrouter' ? model : catalogEntry(provider, model)?.priceAs;
+  if (!id) return null;
+  const list = await openRouterPrices().catch(() => null);
+  return list?.get(id) ?? null;
+}
+
+// What films of a few lengths typically cost on the default model, for the plan and billing pages (each film is
+// charged what it measures).
+// On the Studio's default model (the app's DEFAULT_SETTINGS), which is what a film uses unless changed.
+const STUDIO_DEFAULT_MODEL = { provider: 'glm', model: 'glm-5.3-flash' };
+async function typicalCredits() {
+  const price = await modelPrice(STUDIO_DEFAULT_MODEL.provider, STUDIO_DEFAULT_MODEL.model);
+  return Object.fromEntries([9, 15, 30, 60].map((s) => [s, estimateCredits(price, s)]));
+}
+
+// The cheapest hosts for an OpenRouter model that answer well: 8-bit or better (a 4-bit DeepSeek host answered the
+// brief with "{}" and garbled keys), up at least 98% of the last day, ordered by what a film spends (output weighs
+// most). Up to three, tried in order with no others; null when the list can't be read (OpenRouter then balances).
+async function cheapestRoute(model) {
+  const providers = await openRouterProviders(model).catch(() => null);
+  const good = (providers ?? []).filter((p) => !/^(fp4|fp6|int4)$/i.test(p.quantization ?? '') && (p.uptime == null || p.uptime >= 98));
+  const cost = (p) => 0.4 * p.inputPerM + 0.6 * p.outputPerM;
+  const picked = good.sort((a, b) => cost(a) - cost(b)).slice(0, 3);
+  return picked.length ? picked.map((p) => p.tag).join(',') : null;
+}
+
 const catalogEntry = (provider, model) => MODEL_CATALOG.filter((g) => g.provider === provider).flatMap((g) => g.models).find((m) => m.id === model);
 
 // The provider, model, effort and (OpenRouter) provider route a film request may run on, or why not.
@@ -1452,6 +1611,8 @@ async function chooseModel(user, body) {
       route = body.route;
     }
   }
+  // Auto: the cheapest hosts that answer well, read live (prices move; one DeepSeek host went 10x in a day).
+  if (provider === 'openrouter' && !route) route = await cheapestRoute(model);
   return { provider, model, effort, route, vision: entry?.vision };
 }
 
@@ -1538,6 +1699,15 @@ const server = http.createServer(async (req, res) => {
         providers: providerStatus(),
         models: activeModels,
       });
+    }
+
+    // What a film should cost before it starts: the credits it holds (it is charged what it measures).
+    if (pathname === '/api/billing/estimate' && method === 'GET') {
+      const seconds = Math.max(1, Math.min(60, Math.round(Number(parsedUrl.searchParams.get('length')) || 15)));
+      const provider = parsedUrl.searchParams.get('provider') || config.roles.builder || 'azure';
+      const model = parsedUrl.searchParams.get('model') || config.providers[provider]?.model || '';
+      const price = await modelPrice(provider, model);
+      return sendJson(req, res, 200, { success: true, seconds, credits: estimateCredits(price, seconds), measured: Boolean(price) });
     }
 
     // The providers that can serve one of the Studio's OpenRouter models, for the provider picker.
@@ -2135,9 +2305,19 @@ const server = http.createServer(async (req, res) => {
 
       const ratio = ['16:9', '9:16', '1:1'].includes(body.ratio) ? body.ratio : '16:9';
       const durationS = Number.isFinite(Number(body.length))
-        ? Math.max(5, Math.min(60, Math.round(Number(body.length))))
+        ? Math.max(1, Math.min(60, Math.round(Number(body.length))))
         : 15;
       const inheritedTheme = resolveThemeFromJob(body.themeFrom, user);
+      // An edit of one of this user's finished films: its project is the starting point (see harness edit.js).
+      let editOf = null;
+      if (typeof body.editOf === 'string' && body.editOf) {
+        const base = jobsByPromptId.get(body.editOf) || jobsByHarnessId.get(body.editOf);
+        if (!base || !canSeeJob(user, base)) return sendError(req, res, 404, 'The video to edit was not found.', 'EDIT_NOT_FOUND');
+        if (base.status !== 'done' || !/^[\w-]+$/.test(base.harnessJobId || '') || !fs.existsSync(path.join(JOBS_DIR, base.harnessJobId, 'harness', 'plan.json'))) {
+          return sendError(req, res, 409, 'Only a finished video can be edited.', 'EDIT_NOT_READY');
+        }
+        editOf = base.harnessJobId;
+      }
 
       // Only a model from the Studio list, and the pricier ones only on a paid plan.
       const choice = await chooseModel(user, body);
@@ -2150,8 +2330,10 @@ const server = http.createServer(async (req, res) => {
       const limited = filmLimit(user);
       if (limited) return sendError(req, res, limited.status, limited.message, limited.code);
 
-      // The paywall: the plan's longest film and the credits left this period.
-      const blocked = paywall(user, durationS);
+      // The paywall: the plan's longest film, and the credits left for what this film should use. It holds that
+      // estimate and is charged what it measures when it finishes.
+      const estimate = estimateCredits(await modelPrice(provider, model), durationS);
+      const blocked = paywall(user, durationS, Date.now(), estimate);
       if (blocked) {
         saveDb();
         return sendJson(req, res, 402, { success: false, error: blocked.code, ...blocked });
@@ -2206,8 +2388,8 @@ const server = http.createServer(async (req, res) => {
       };
       pushLog(job, `Prompt queued: "${prompt.slice(0, 120)}" [${provider}/${model} · ${effort}${route ? ` · via ${route}` : ''}]`);
 
-      // Charged on submit, refunded if the film fails (see the job's failure path).
-      charge(user, job, durationS);
+      // Held on submit, settled to the measured cost when it finishes, refunded if it fails.
+      charge(user, job, durationS, estimate);
       persistJobRecord(job);
       if (user.usage?.generations) {
         user.usage.generations.daily += 1;
@@ -2216,9 +2398,13 @@ const server = http.createServer(async (req, res) => {
       }
       saveDb();
 
+      if (editOf) {
+        job.editOf = editOf;
+        pushLog(job, `Editing ${editOf}`);
+      }
       enqueueHarnessExecution({
         job,
-        mode: 'run',
+        mode: editOf ? 'edit' : 'run',
         options,
       });
 
@@ -2249,9 +2435,10 @@ const server = http.createServer(async (req, res) => {
       const limited = filmLimit(user);
       if (limited) return sendError(req, res, limited.status, limited.message, limited.code);
       if (!job.credits || job.creditsRefunded) {
-        const blocked = paywall(user, job.durationS || 15);
+        const estimate = estimateCredits(await modelPrice(job.provider, job.model), job.durationS || 15);
+        const blocked = paywall(user, job.durationS || 15, Date.now(), estimate);
         if (blocked) return sendJson(req, res, 402, { success: false, error: blocked.code, ...blocked });
-        charge(user, job, job.durationS || 15);
+        charge(user, job, job.durationS || 15, estimate);
         saveDb();
       }
 
@@ -2272,7 +2459,7 @@ const server = http.createServer(async (req, res) => {
 
       enqueueHarnessExecution({
         job,
-        mode: canResumeOnDisk ? 'resume' : 'run',
+        mode: job.editOf ? 'edit' : canResumeOnDisk ? 'resume' : 'run',
         resumeDir: canResumeOnDisk ? resumeDir : undefined,
         options: {
           aspect: job.ratio || '16:9',
@@ -2579,6 +2766,49 @@ const server = http.createServer(async (req, res) => {
     // =========================================================================
     // 7. CONVERSATIONS, BRAND KIT, ASSETS, BILLING & MOTION GLYPHS
     // =========================================================================
+    // The Studio's chats, so they follow their owner to any browser. GET returns them all (newest first) with
+    // the ids deleted elsewhere; PUT keeps the newer copy of a chat; DELETE leaves a tombstone so another
+    // browser drops its copy instead of uploading it again.
+    if (pathname === '/api/chats' && method === 'GET') {
+      const user = getAuthenticatedUser(req);
+      if (!user) return sendError(req, res, 401, 'Please sign in to see your chats.', 'UNAUTHORIZED');
+      const store = readChatStore(user.id);
+      const chats = Object.values(store.chats).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+      return sendJson(req, res, 200, { success: true, chats, deleted: Object.keys(store.deleted) });
+    }
+
+    const chatMatch = /^\/api\/chats\/([\w-]{1,100})$/.exec(pathname);
+    if (chatMatch && (method === 'PUT' || method === 'DELETE')) {
+      const user = getAuthenticatedUser(req);
+      if (!user) return sendError(req, res, 401, 'Please sign in to save chats.', 'UNAUTHORIZED');
+      const id = chatMatch[1];
+      const store = readChatStore(user.id);
+      if (method === 'DELETE') {
+        delete store.chats[id];
+        store.deleted[id] = new Date().toISOString();
+        writeChatStore(user.id, store);
+        return sendJson(req, res, 200, { success: true });
+      }
+      // ?restore=1 is Undo right after a delete; otherwise a deleted chat stays deleted.
+      if (store.deleted[id]) {
+        if (parsedUrl.searchParams.get('restore') !== '1') return sendError(req, res, 410, 'This chat was deleted.', 'CHAT_DELETED');
+        delete store.deleted[id];
+      }
+      let chat;
+      try {
+        chat = cleanChat(await readBody(req, MAX_CHAT_BYTES * 2), id);
+      } catch (err) {
+        return sendError(req, res, 400, err.message, 'INVALID_CHAT');
+      }
+      const stored = store.chats[id];
+      // Two browsers editing one chat: the later edit wins, and the other gets it back to show.
+      if (stored && String(stored.updatedAt) > chat.updatedAt) return sendJson(req, res, 409, { success: false, error: 'CHAT_NEWER', chat: stored });
+      store.chats[id] = chat;
+      trimChatStore(store);
+      writeChatStore(user.id, store);
+      return sendJson(req, res, 200, { success: true, chat });
+    }
+
     // Each account sees and adds only its own conversations.
     if (pathname === '/api/conversations' && method === 'GET') {
       const user = getAuthenticatedUser(req);
@@ -2752,7 +2982,7 @@ const server = http.createServer(async (req, res) => {
           manageable: Boolean(p.customerId),
         },
         credits: { used: c.used, limit: c.limit, remaining: c.remaining, periodStart: c.periodStart, periodEnd: c.periodEnd },
-        limits: { maxSeconds: PLANS[c.tier].maxSeconds, creditsPerFilm: { 9: creditCost(9), 15: creditCost(15), 30: creditCost(30), 60: creditCost(60) } },
+        limits: { maxSeconds: PLANS[c.tier].maxSeconds, creditsPerFilm: await typicalCredits() },
         totals: {
           films: films.length,
           completed: films.filter((f) => f.status === 'done').length,
@@ -2776,7 +3006,7 @@ const server = http.createServer(async (req, res) => {
         success: true,
         configured: billingConfigured(),
         plans: await listPlans(),
-        creditsPerFilm: { 9: creditCost(9), 15: creditCost(15), 30: creditCost(30), 60: creditCost(60) },
+        creditsPerFilm: await typicalCredits(),
       });
     }
 

@@ -1042,6 +1042,12 @@ function createHarnessEventHandler(job) {
         if (ev.userFacing && ev.message) job.notes = [...(job.notes ?? []), String(ev.message).slice(0, 300)].slice(-5);
         break;
       }
+      case 'edit_plan': {
+        // What an edit changes, in the person's words: shown with the finished video (it says when a size asked
+        // for couldn't fit and what was done instead).
+        if (ev.summary) job.editSummary = String(ev.summary).slice(0, 400);
+        break;
+      }
 
       case 'job_done': {
         job.status = 'done';

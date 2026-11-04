@@ -16,7 +16,7 @@ import { runBuild } from './build/index.js';
 const MODE = 'edit';
 
 const EDIT_REPLY = `{
-  "summary": "what changes, one line, in the person's terms",
+  "summary": "what changes, in one or two plain sentences for the person who asked: no px, CSS or code words",
   "changes": { "<scene id>": "exactly what to change in that scene's file: sizes, colours, copy, motion, timing, in numbers" },
   "must": ["the film's asks after this change: the current must list, updated by the request"],
   "plan": <the whole revised plan, in the plan shape above>

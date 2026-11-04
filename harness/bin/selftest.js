@@ -540,11 +540,18 @@ await step('agent loop: a reply cut off at the output limit runs none of its too
   assert.ok(events.some((e) => e.type === 'cut_off'));
 });
 
-await step('GLM: low effort turns thinking off, medium and up turn it on', async () => {
+await step('GLM: older models switch thinking off at low effort; GLM 5 (always thinking) turns it down instead', async () => {
   const { requestBody } = await import('../src/llm.js');
-  const glm = (effort) => requestBody({ kind: 'glm', model: 'glm', effort }, [], null).thinking?.type;
+  const glm = (effort) => requestBody({ kind: 'glm', model: 'glm-4.6', effort }, [], null).thinking?.type;
   assert.deepEqual(['none', 'low', 'medium', 'xhigh'].map(glm), ['disabled', 'disabled', 'enabled', 'enabled']);
   assert.equal(glm(''), undefined, 'no effort: the provider default');
+  // GLM 5 answers thinking "disabled" with a 400: it takes reasoning_effort low, high or max, never "disabled".
+  const glm5 = (effort) => requestBody({ kind: 'glm', model: 'glm-5.3-flash', effort }, [], null);
+  assert.deepEqual(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map((e) => glm5(e).reasoning_effort), ['low', 'low', 'low', 'high', 'high', 'max', 'max']);
+  assert.ok(['none', 'low', 'high'].every((e) => glm5(e).thinking === undefined), 'GLM 5 is never sent a thinking switch');
+  const viaOpenRouter = (model) => requestBody({ kind: 'openrouter', model, effort: 'none' }, [], null).reasoning;
+  assert.deepEqual(viaOpenRouter('z-ai/glm-5.3-flash'), { effort: 'low' }, 'GLM 5 on OpenRouter: "none" asks for the least');
+  assert.deepEqual(viaOpenRouter('deepseek/deepseek-v4.1-flash'), { enabled: false });
 });
 
 await step('JSON replies: JSON mode on OpenAI/Azure, and one fresh ask when a reply is not valid JSON', async () => {

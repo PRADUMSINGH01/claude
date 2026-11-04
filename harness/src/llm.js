@@ -53,16 +53,27 @@ export function requestBody(p, messages, tools, toolChoice, maxOut = config.maxO
   if (p.kind === 'gemini' && p.effort) body.reasoning_effort = p.effort === 'minimal' ? 'low' : p.effort;
   // OpenRouter's unified reasoning setting: low, medium or high ("xhigh"/"max" ask for its highest).
   if (p.kind === 'openrouter' && p.effort) {
-    body.reasoning = p.effort === 'none' ? { enabled: false } : { effort: { minimal: 'low', xhigh: 'high', max: 'high' }[p.effort] ?? p.effort };
+    // GLM 5 always thinks, so "none" asks for its least.
+    const off = p.effort === 'none' && !ALWAYS_THINKS.test(p.model);
+    body.reasoning = off ? { enabled: false } : { effort: { none: 'low', minimal: 'low', xhigh: 'high', max: 'high' }[p.effort] ?? p.effort };
   }
   if (p.kind === 'openrouter' && p.route) body.provider = openRouterRoute(p.route);
   // OpenRouter reports what each call was billed (usage.cost, USD): films are charged by that, not a guess.
   if (p.kind === 'openrouter') body.usage = { include: true };
-  // GLM's thinking is only on or off. Low effort turns it off: thinking can spend a whole 16k–32k output
-  // budget before a single line of a scene file is written (seen in real runs).
-  if (p.kind === 'glm' && p.effort) body.thinking = { type: ['none', 'minimal', 'low'].includes(p.effort) ? 'disabled' : 'enabled' };
+  // GLM 5 always thinks: it refuses thinking "disabled" (400, "cannot be disabled; please use low, high, or max")
+  // and takes reasoning_effort low, high or max instead; low spent no reasoning tokens on a short probe
+  // (2026-11-04). Older GLM models only switch thinking on or off. Low effort keeps thinking short or off: it can
+  // spend a whole 16k–32k output budget before a single line of a scene file is written (seen in real runs).
+  if (p.kind === 'glm' && p.effort) {
+    const low = ['none', 'minimal', 'low'].includes(p.effort);
+    if (ALWAYS_THINKS.test(p.model)) body.reasoning_effort = low ? 'low' : ['xhigh', 'max'].includes(p.effort) ? 'max' : 'high';
+    else body.thinking = { type: low ? 'disabled' : 'enabled' };
+  }
   return body;
 }
+
+// Models whose reasoning cannot be switched off, only turned down.
+const ALWAYS_THINKS = /glm-5/i;
 
 // OpenRouter's provider routing: a sort orders every provider serving the model; a provider tag pins that one,
 // with no fallback to another (the choice is the point: its price, region or quantization).

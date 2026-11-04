@@ -610,8 +610,10 @@ function presentJob(job) {
   return { ...shown, play: playable ? [buildVideoUrl(job.harnessJobId)] : job.play ?? [], poster: playable ? buildThumbnailUrl(job.harnessJobId) : null };
 }
 
-// A still of a finished film: one frame from late in it, where the title has landed (a build-up's first frame
-// is often empty). Made once with ffmpeg and kept next to the render; concurrent requests share one run.
+// A still of a finished film: the most representative frame of its later part (ffmpeg's thumbnail filter picks
+// the frame closest to the average, so the settled look the film holds, not a build-up's empty first frame or a
+// moment mid-transition where two lines of words overlap). Made once and kept next to the render; concurrent
+// requests share one run.
 const posterRuns = new Map();
 function filmPoster(jobDir, seconds) {
   const video = path.join(jobDir, 'project', 'renders', 'final.mp4');
@@ -619,15 +621,18 @@ function filmPoster(jobDir, seconds) {
   if (fs.existsSync(poster)) return Promise.resolve(poster);
   if (!fs.existsSync(video)) return Promise.resolve(null);
   if (posterRuns.has(poster)) return posterRuns.get(poster);
-  const grab = (at) =>
+  const grab = (input) =>
     new Promise((resolve) => {
-      execFile('ffmpeg', ['-v', 'error', '-y', '-ss', at, '-i', video, '-frames:v', '1', '-vf', 'scale=720:-2', '-q:v', '4', poster], { timeout: 20_000 }, (err) =>
+      execFile('ffmpeg', ['-v', 'error', '-y', ...input, '-frames:v', '1', '-q:v', '4', poster], { timeout: 30_000 }, (err) =>
         resolve(!err && fs.existsSync(poster) ? poster : null)
       );
     });
+  // The last 65% of the film, sampled 5 times a second (a few dozen 720p frames in memory at most).
+  const d = Math.max(1, Number(seconds) || 5);
+  const later = ['-ss', (d * 0.35).toFixed(2), '-t', (d * 0.65).toFixed(2), '-i', video, '-vf', `fps=5,scale=720:-2,thumbnail=${Math.ceil(d * 0.65 * 5)}`];
   // A seek past the end (an unknown length) writes nothing; the first frame is better than no still.
-  const run = grab((Math.max(1, Number(seconds) || 5) * 0.7).toFixed(2))
-    .then((made) => made || grab('0'))
+  const run = grab(later)
+    .then((made) => made || grab(['-i', video, '-vf', 'scale=720:-2']))
     .finally(() => posterRuns.delete(poster));
   posterRuns.set(poster, run);
   return run;
@@ -1473,8 +1478,9 @@ const MODEL_CATALOG = [
     provider: 'glm',
     name: 'Zhipu GLM',
     models: [
-      { id: 'glm-5.3-flash', name: 'GLM 5.3 Flash', priceAs: 'z-ai/glm-5.3-flash', tag: 'Ultra Fast', defaultEffort: 'low', efforts: ['low', 'medium', 'high'], description: 'High speed Chinese/English multimodal reasoning' },
-      { id: 'glm-4.6', name: 'GLM 4.6', priceAs: 'z-ai/glm-4.6', tag: 'Standard', defaultEffort: 'low', efforts: ['low', 'medium'], description: 'Standard GLM model' }
+      // GLM 5 always thinks: low or high (medium would be the same as high). GLM 4.6 was offered here but the
+      // account has no package for it (every call answered 429 "Insufficient balance", 2026-11-04).
+      { id: 'glm-5.3-flash', name: 'GLM 5.3 Flash', priceAs: 'z-ai/glm-5.3-flash', tag: 'Ultra Fast', defaultEffort: 'low', efforts: ['low', 'high'], description: 'High speed Chinese/English multimodal reasoning' }
     ]
   },
   {
